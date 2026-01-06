@@ -323,4 +323,13 @@ else:
     if summary:
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("區間已領股息", f"${summary['總領股息']:,.0f}")
-        k2.metric("區間賣出金額", f
+        k2.metric("區間賣出金額", f"${summary['總賣出']:,.0f}")
+        k3.metric("區間買入投入", f"${summary['總買入']:,.0f}")
+        k4.metric("區間淨現金流", f"${summary['淨現金流']:,.0f}")
+        
+        with st.expander("查看區間交易明細 (賣出/領息)", expanded=True):
+            view_df = period_df[period_df['Action'].isin(['Sell', 'Dividend'])].copy()
+            if not view_df.empty:
+                st.dataframe(view_df[['Date', 'Ticker', 'Action', 'Shares', 'Total_Amount', 'Note']], use_container_width=True)
+            else:
+                st.info("無賣出或領息紀錄。")
