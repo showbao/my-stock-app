@@ -1,5 +1,5 @@
-# Version: v2.0
-# CTOSignature: Card UI, Annualized ROI, Yearly Breakdown, Cleaned Interface
+# Version: v2.1
+# CTOSignature: CAGR Fix - Include Unrealized Market Value in Return Calculation
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -53,7 +53,6 @@ def get_usd_twd_rate():
 def get_stock_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        # auto_adjust=True 確保歷史價格平滑，計算波動率才準確
         hist = stock.history(period='1mo', auto_adjust=True)
         
         if not hist.empty:
@@ -169,12 +168,13 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
                 "含息總報%": round(roi_total, 2),
                 "已領股息": round(data['dividend_collected'], 0),
                 "填息": fill_status,
-                "總成本": round(data['total_cost'], 0) # 為了總覽計算用
+                "總成本": round(data['total_cost'], 0)
             })
             
     return pd.DataFrame(results)
 
-def analyze_period(df, start_date, end_date, selected_tickers):
+# --- v2.1 重點修正函數 ---
+def analyze_period(df, start_date, end_date, selected_tickers, current_portfolio_df):
     mask = (df['Date'] >= start_date) & (df['Date'] <= end_date)
     if selected_tickers:
         mask = mask & (df['Ticker'].isin(selected_tickers))
@@ -182,45 +182,58 @@ def analyze_period(df, start_date, end_date, selected_tickers):
     
     if period_df.empty: return None, pd.DataFrame(), pd.DataFrame()
 
-    # 1. 區間總計
     total_dividend = period_df[period_df['Action'] == 'Dividend']['Total_Amount'].sum()
     total_buy = period_df[period_df['Action'] == 'Buy']['Total_Amount'].sum()
     total_sell = period_df[period_df['Action'] == 'Sell']['Total_Amount'].sum()
     
-    # 計算年化報酬率所需數據
-    days = (end_date - start_date).days
-    # 簡單估算 ROI: (賣出獲利? 不容易算，改用 現金流回收率) -> 
-    # 這裡我們用「淨現金流 / 總投入」作為區間回報的參考 (Simple Yield)
-    # 但為了精準，我們顯示 "資金回收率" = (賣出+股息) / 買入
-    return_rate = ((total_sell + total_dividend) / total_buy * 100) if total_buy > 0 else 0
+    # 核心修正：計算「期末庫存價值」
+    # 邏輯：如果結束日期是今天 (或未來)，我們就把「目前手上的股票市值」加回去當作回收
+    # 注意：如果使用者選的是「過去某一年」，這個算法會不準 (因為不知道當時的市值)，所以只在查看 "至今" 時啟用
     
+    ending_inventory_value = 0
+    is_current = end_date >= datetime.now().date()
+    
+    if is_current and not current_portfolio_df.empty:
+        # 篩選出符合條件的庫存
+        if selected_tickers:
+             target_inventory = current_portfolio_df[current_portfolio_df['代號'].isin(selected_tickers)]
+        else:
+             target_inventory = current_portfolio_df
+        
+        ending_inventory_value = target_inventory['市值'].sum()
+
+    # 分子：賣掉拿回的錢 + 領到的股息 + (還沒賣但值錢的庫存)
+    total_recovered = total_sell + total_dividend + ending_inventory_value
+    
+    return_rate = (total_recovered / total_buy * 100) if total_buy > 0 else 0
+    
+    days = (end_date - start_date).days
     # 年化計算 (CAGR)
-    if days > 365 and total_buy > 0:
+    # 公式：(期末總值 / 總投入)^(1/年數) - 1
+    # 期末總值 = 賣出 + 股息 + 現有庫存市值
+    
+    if days > 365 and total_buy > 0 and total_recovered > 0:
         years = days / 365
-        # 公式: (終值/現值)^(1/n) - 1
-        # 這裡假設 終值 = 賣出+股息 (已回收), 現值 = 買入 (投入)
-        # 注意：這只適用於該區間「已結清」的交易評估，若還有庫存會失準
-        # 故標示為「現金回收年化率」
-        annualized_return = (pow((total_sell + total_dividend)/total_buy, 1/years) - 1) * 100
+        annualized_return = (pow(total_recovered / total_buy, 1/years) - 1) * 100
     else:
-        annualized_return = None # 未滿一年或無投入不計算
+        annualized_return = None
 
     summary = {
         "總領股息": total_dividend,
         "總買入": total_buy,
         "總賣出": total_sell,
         "淨現金流": (total_sell + total_dividend) - total_buy,
-        "資金回收率%": return_rate,
-        "年化回收率%": annualized_return
+        "總回報率%": return_rate - 100, # 扣掉本金顯示淨利%
+        "年化回收率%": annualized_return,
+        "期末庫存市值": ending_inventory_value # 用於 debug 或顯示
     }
 
-    # 2. 年度分列 (Year-over-Year Breakdown)
+    # 年度分列
     years_data = []
     start_y = start_date.year
     end_y = end_date.year
     
     for y in range(start_y, end_y + 1):
-        # 篩選該年度
         y_df = period_df[pd.to_datetime(period_df['Date']).dt.year == y]
         if not y_df.empty:
             y_div = y_df[y_df['Action'] == 'Dividend']['Total_Amount'].sum()
@@ -310,9 +323,9 @@ with st.sidebar:
             st.cache_data.clear()
 
 # --- Main Dashboard ---
-st.title("📊 投資戰情室 v2.0")
+st.title("📊 投資戰情室 v2.1")
 
-# 1. 篩選器 (Top)
+# 1. 篩選器
 _df, _, _ = load_data()
 all_tickers = _df['Ticker'].unique().tolist() if not _df.empty else []
 
@@ -328,47 +341,47 @@ with col_s3:
 df, df_funds, usd_rate = load_data()
 
 if not df.empty:
-    # 2. 查詢區：卡片式 Metrics + 年度表 (Middle)
-    summary, period_df, years_df = analyze_period(df, analysis_start, analysis_end, selected_tickers)
+    # 先計算庫存，因為分析需要用到庫存市值
+    portfolio_df = calculate_portfolio(df, df_funds, usd_rate)
+    
+    # 2. 查詢區
+    summary, period_df, years_df = analyze_period(df, analysis_start, analysis_end, selected_tickers, portfolio_df)
     
     if summary:
         st.markdown("### 📈 區間績效看板")
-        # 卡片式呈現 (Row 1)
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("區間已領股息", f"${summary['總領股息']:,.0f}")
-        k2.metric("區間淨現金流", f"${summary['淨現金流']:,.0f}", delta_color="normal")
+        k2.metric("區間淨現金流", f"${summary['淨現金流']:,.0f}", help="正數=回收資金, 負數=持續投入")
         
-        # 顯示年化報酬 (如果有)
+        # 顯示年化報酬
         if summary['年化回收率%'] is not None:
-            k3.metric("年化回收率 (CAGR)", f"{summary['年化回收率%']:.2f}%", help="假設賣出與股息為回收終值，計算年複合成長")
+            # 如果有加回庫存市值，標題改一下讓使用者知道
+            if summary['期末庫存市值'] > 0:
+                k3.metric("年化報酬率 (CAGR)", f"{summary['年化回收率%']:.2f}%", help="含息 + 含目前庫存市值")
+            else:
+                k3.metric("年化回收率 (CAGR)", f"{summary['年化回收率%']:.2f}%", help="僅計算現金回收 (已清倉適用)")
         else:
-            k3.metric("區間回收率", f"{summary['資金回收率%']:.2f}%", help="未滿一年，顯示絕對回報率")
+            k3.metric("區間總回報", f"{summary['總回報率%']:.2f}%", help="絕對報酬率")
             
-        k4.metric("交易筆數", f"{len(period_df)} 筆")
+        k4.metric("庫存潛在價值", f"${summary['期末庫存市值']:,.0f}", help="若現在全賣掉可拿回的錢 (已加計入CAGR)")
 
-        # 年度分列 (Row 2: 如果有跨年度資料)
         if not years_df.empty and len(years_df) > 1:
-            with st.expander("📅 年度績效比較表 (Year-over-Year)", expanded=True):
+            with st.expander("📅 年度績效比較表", expanded=True):
                 st.dataframe(years_df, use_container_width=True, hide_index=True)
         
         st.divider()
 
-    # 3. 現有庫存區：庫存總覽 + 詳細列表 (Bottom)
+    # 3. 現有庫存區
     st.markdown("### 📦 現有庫存明細")
-    portfolio_df = calculate_portfolio(df, df_funds, usd_rate)
-    
     if not portfolio_df.empty:
         if selected_tickers:
             portfolio_df = portfolio_df[portfolio_df['代號'].isin(selected_tickers)]
 
-        # --- 新增：庫存總覽列 (Summary Row) ---
         total_mv = portfolio_df['市值'].sum()
         total_cost = portfolio_df['總成本'].sum()
         total_pl = portfolio_df['帳面損益'].sum()
         
-        # 簡單的 HTML/Markdown 排版做總覽
         st.info(f"📊 **庫存總覽**｜ 總市值: **${total_mv:,.0f}** ｜ 總投入成本: **${total_cost:,.0f}** ｜ 總帳面損益: **${total_pl:,.0f}**")
-        # ------------------------------------
 
         cols_show = ["代號", "庫存", "平均成本", "市價", "波動率%", "市值", "帳面損益", "成本殖利率%", "含息總報%", "填息"]
         
