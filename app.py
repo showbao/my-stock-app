@@ -1,5 +1,5 @@
-# Version: v1.7
-# CTOSignature: Force Reset Mechanism & Calculation Precision Fix
+# Version: v1.9
+# CTOSignature: UI Overhaul - Top Dashboard & Filter Integration
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -53,7 +53,9 @@ def get_usd_twd_rate():
 def get_stock_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period='1mo')
+        # auto_adjust=True 確保分割/股息還原，計算波動率才準確
+        hist = stock.history(period='1mo', auto_adjust=True)
+        
         if not hist.empty:
             current_price = hist['Close'].iloc[-1]
             if len(hist) > 1:
@@ -108,18 +110,13 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
             
         elif action == 'Sell':
             if p['shares'] > 0:
-                # 計算本次賣出佔總庫存的比例，依比例扣除成本 (比單純減法更精準)
-                # 這是防止 "Total Cost" 因為小數點誤差而殘留的關鍵算法
                 pct_sold = qty / p['shares']
                 cost_of_sold_shares = p['total_cost'] * pct_sold
-                
                 p['realized_pl'] += (amount - cost_of_sold_shares)
                 p['total_cost'] -= cost_of_sold_shares
                 p['shares'] -= qty
                 
-                # --- v1.7 核心修正：強制歸零機制 ---
-                # 如果股數極小 (例如 0.00001) 或變成負數，視為清倉，強制歸零
-                if p['shares'] <= 0.001:
+                if p['shares'] <= 0.001: # 強制歸零
                     p['shares'] = 0
                     p['total_cost'] = 0
                     
@@ -128,7 +125,6 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
             
         elif action == 'Split': 
             p['shares'] += qty
-            # 分割後也檢查一下，防止出現負股數異常
             if p['shares'] <= 0.001:
                 p['shares'] = 0
                 p['total_cost'] = 0
@@ -139,7 +135,6 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
         market_value = 0
         volatility = 0
         
-        # 顯示條件：庫存 > 0 才顯示
         if data['shares'] > 0.001:
             if data['type'] == 'Stock':
                 current_price, volatility = get_stock_data(ticker)
@@ -208,7 +203,6 @@ with st.sidebar:
     with st.form("entry_form"):
         date_in = st.date_input("日期")
         ticker = st.text_input("代號", value="").upper()
-        
         typ_display = st.selectbox("種類", ["股票 (Stock)", "基金 (Fund)"])
         strategy_display = st.selectbox("策略", ["存股 (Dividend)", "波段 (Swing)"])
         action_display = st.selectbox("動作", ["買入 (Buy)", "賣出 (Sell)", "領息 (Dividend)", "分割/減資 (Split)"])
@@ -223,7 +217,6 @@ with st.sidebar:
         note = st.text_input("備註")
         
         submitted = st.form_submit_button("送出紀錄")
-        
         if submitted:
             typ_map = {"股票 (Stock)": "Stock", "基金 (Fund)": "Fund"}
             strat_map = {"存股 (Dividend)": "Dividend", "波段 (Swing)": "Swing"}
@@ -273,63 +266,66 @@ with st.sidebar:
             st.cache_data.clear()
 
 # --- Main Dashboard ---
-st.title("📊 投資戰情室 v1.7")
+st.title("📊 投資戰情室 v1.9")
 
-with st.expander("🔍 戰情分析篩選器 (日期/代號)", expanded=True):
-    col_f1, col_f2 = st.columns(2)
-    with col_f1:
-        analysis_start = st.date_input("開始日期", value=date(datetime.now().year, 1, 1))
-    with col_f2:
-        analysis_end = st.date_input("結束日期", value=datetime.now().date())
-    
-    _df, _, _ = load_data()
-    all_tickers = _df['Ticker'].unique().tolist() if not _df.empty else []
-    selected_tickers = st.multiselect("篩選代號", all_tickers)
+# 1. 頂部儀表板：篩選與關鍵數據 (Layout Refined)
+# 預載資料
+_df, _, _ = load_data()
+all_tickers = _df['Ticker'].unique().tolist() if not _df.empty else []
 
+# 建立三欄式篩選器
+col_s1, col_s2, col_s3 = st.columns([1, 1, 2])
+with col_s1:
+    analysis_start = st.date_input("開始日期", value=date(datetime.now().year, 1, 1))
+with col_s2:
+    analysis_end = st.date_input("結束日期", value=datetime.now().date())
+with col_s3:
+    selected_tickers = st.multiselect("篩選代號 (可多選，留空則全選)", all_tickers)
+
+# 載入正式資料
 df, df_funds, usd_rate = load_data()
 
-if df.empty:
-    st.info("尚無資料，請先輸入交易。")
-else:
+if not df.empty:
+    # 立即計算篩選區間的數據 (Dashboard Metrics)
+    summary, period_df = analyze_period(df, analysis_start, analysis_end, selected_tickers)
+    
+    if summary:
+        st.markdown("---")
+        # 顯示區間統計指標
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("區間已領股息", f"${summary['總領股息']:,.0f}")
+        k2.metric("區間賣出金額", f"${summary['總賣出']:,.0f}")
+        k3.metric("區間買入投入", f"${summary['總買入']:,.0f}")
+        k4.metric("區間淨現金流", f"${summary['淨現金流']:,.0f}", help="正值=從市場提款 / 負值=加碼投入")
+
+    # 2. 庫存表格 (Snapshot - 顯示當下庫存)
+    st.markdown("### 📦 現有庫存明細")
     portfolio_df = calculate_portfolio(df, df_funds, usd_rate)
     
     if not portfolio_df.empty:
-        total_market_value = portfolio_df['市值'].sum()
-        total_unrealized = portfolio_df['帳面損益'].sum()
-        total_div_all_time = portfolio_df['已領股息'].sum()
-        
-        m1, m2, m3 = st.columns(3)
-        m1.metric("目前總市值", f"${total_market_value:,.0f}")
-        m2.metric("總帳面損益", f"${total_unrealized:,.0f}", delta_color="normal")
-        m3.metric("歷史總領息", f"${total_div_all_time:,.0f}")
-        
-        st.subheader("📦 現有庫存明細")
+        # 如果有篩選代號，庫存表也跟著只顯示該代號 (但計算邏輯依然是全歷史累積)
+        if selected_tickers:
+            portfolio_df = portfolio_df[portfolio_df['代號'].isin(selected_tickers)]
+
         cols_show = ["代號", "庫存", "平均成本", "市價", "波動率%", "市值", "帳面損益", "成本殖利率%", "含息總報%", "填息"]
         
         tab_div, tab_swing = st.tabs(["💰 存股 / 基金", "🚀 波段交易"])
         with tab_div:
             div_assets = portfolio_df[portfolio_df['策略'] == 'Dividend']
             if not div_assets.empty: st.dataframe(div_assets[cols_show], use_container_width=True, hide_index=True)
-            else: st.write("無存股資產")
+            else: st.write("無符合條件的存股資產")
         with tab_swing:
             swing_assets = portfolio_df[portfolio_df['策略'] == 'Swing']
             if not swing_assets.empty: st.dataframe(swing_assets[cols_show], use_container_width=True, hide_index=True)
-            else: st.write("無波段資產")
-
-    st.divider()
-    st.subheader(f"📅 區間績效回測 ({analysis_start} ~ {analysis_end})")
-    summary, period_df = analyze_period(df, analysis_start, analysis_end, selected_tickers)
-    
+            else: st.write("無符合條件的波段資產")
+            
+    # 3. 交易明細 (底部摺疊)
     if summary:
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("區間已領股息", f"${summary['總領股息']:,.0f}")
-        k2.metric("區間賣出金額", f"${summary['總賣出']:,.0f}")
-        k3.metric("區間買入投入", f"${summary['總買入']:,.0f}")
-        k4.metric("區間淨現金流", f"${summary['淨現金流']:,.0f}")
-        
-        with st.expander("查看區間交易明細 (賣出/領息)", expanded=True):
+        with st.expander("查看區間交易明細 (賣出/領息)"):
             view_df = period_df[period_df['Action'].isin(['Sell', 'Dividend'])].copy()
             if not view_df.empty:
                 st.dataframe(view_df[['Date', 'Ticker', 'Action', 'Shares', 'Total_Amount', 'Note']], use_container_width=True)
             else:
-                st.info("無賣出或領息紀錄。")
+                st.info("此區間無賣出或領息紀錄。")
+else:
+    st.info("尚無資料，請先輸入交易。")
