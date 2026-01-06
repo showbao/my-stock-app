@@ -1,5 +1,5 @@
-# Version: v1.1
-# CTOSignature: Cloud Deployment Version with Secure Secrets
+# Version: v1.2
+# CTOSignature: Traditional Chinese UI & Smart Calculation Logic
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -18,17 +18,13 @@ st.set_page_config(page_title="投資追蹤指揮中心", layout="wide", initial
 def connect_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # v1.1 修改：從 Streamlit Secrets 讀取金鑰，而非讀取本地檔案
-        # 這能防止金鑰上傳到 GitHub 導致外洩
         if "gcp_service_account" in st.secrets:
             creds_dict = st.secrets["gcp_service_account"]
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         else:
-            # 本地備用方案 (如果您之後想在電腦跑)
             creds = ServiceAccountCredentials.from_json_keyfile_name("secrets.json", scope)
             
         client = gspread.authorize(creds)
-        # 嘗試開啟試算表
         sheet = client.open("Investment_Tracker")
         return sheet
     except Exception as e:
@@ -43,7 +39,6 @@ ws_funds = sh.worksheet("Fund_Updates")
 # 2. 核心邏輯函數 (Core Functions)
 # ==========================================
 
-# 抓取 USD/TWD 即時匯率
 @st.cache_data(ttl=3600) 
 def get_usd_twd_rate():
     try:
@@ -55,7 +50,6 @@ def get_usd_twd_rate():
     except:
         return 32.0
 
-# 抓取股票即時股價
 @st.cache_data(ttl=600)
 def get_stock_price(ticker):
     try:
@@ -67,7 +61,6 @@ def get_stock_price(ticker):
     except:
         return 0.0
 
-# 載入並處理資料
 def load_data():
     records_data = ws_records.get_all_records()
     df = pd.DataFrame(records_data)
@@ -84,7 +77,6 @@ def load_data():
     current_usd_rate = get_usd_twd_rate()
     return df, df_funds, current_usd_rate
 
-# 計算平均成本與庫存
 def calculate_portfolio(df, df_funds, current_usd_rate):
     portfolio = {}
     df = df.sort_values('Date')
@@ -161,20 +153,56 @@ with st.sidebar:
     with st.form("entry_form"):
         date = st.date_input("日期")
         ticker = st.text_input("代號 (如 2330.TW)", value="").upper()
-        typ = st.selectbox("種類", ["Stock", "Fund"])
-        strategy = st.selectbox("策略", ["Dividend (存股)", "Swing (波段)"])
-        action = st.selectbox("動作", ["Buy", "Sell", "Dividend"])
-        price = st.number_input("單價/淨值", min_value=0.0, format="%.2f")
-        shares = st.number_input("股數/單位", min_value=0.0, format="%.2f")
+        
+        # 中文選單，後端會轉換回英文
+        typ_display = st.selectbox("種類", ["股票 (Stock)", "基金 (Fund)"])
+        strategy_display = st.selectbox("策略", ["存股 (Dividend)", "波段 (Swing)"])
+        action_display = st.selectbox("動作", ["買入 (Buy)", "賣出 (Sell)", "領息 (Dividend)"])
+        
+        price = st.number_input("單價 / 淨值", min_value=0.0, format="%.2f", help="領息時請忽略此欄")
+        shares = st.number_input("股數 / 單位數", min_value=0.0, format="%.2f", help="領息時請忽略此欄")
         fee = st.number_input("手續費 (TWD)", min_value=0, value=0)
-        total_amt = st.number_input("總金額 (TWD)", min_value=0.0, format="%.2f")
+        
+        # 總金額設為可選填
+        total_amt = st.number_input("總金額 (TWD)", min_value=0.0, format="%.2f", help="買賣時若留 0，系統會自動用 (單價x股數)+手續費 計算。領息時請務必填寫實際入帳金額。")
         note = st.text_input("備註")
+        
         submitted = st.form_submit_button("送出紀錄")
         
         if submitted:
-            new_row = [str(date), ticker, typ, strategy.split()[0], action, price, shares, fee, total_amt, note]
+            # 1. 語言轉換 (Mapping)
+            typ_map = {"股票 (Stock)": "Stock", "基金 (Fund)": "Fund"}
+            strat_map = {"存股 (Dividend)": "Dividend", "波段 (Swing)": "Swing"}
+            act_map = {"買入 (Buy)": "Buy", "賣出 (Sell)": "Sell", "領息 (Dividend)": "Dividend"}
+            
+            db_type = typ_map[typ_display]
+            db_strat = strat_map[strategy_display]
+            db_action = act_map[action_display]
+            
+            # 2. 智慧運算邏輯 (Auto-Calculation)
+            final_shares = shares
+            final_price = price
+            final_total = total_amt
+
+            if db_action == "Dividend":
+                # 領息模式：強制將單價與股數歸零，只看總金額
+                final_shares = 0
+                final_price = 0
+                if final_total == 0:
+                     st.error("⚠️ 領息模式下，「總金額」不能為 0！")
+                     st.stop()
+            else:
+                # 買賣模式：如果總金額是 0，自動計算
+                if final_total == 0:
+                    calculated_total = (price * shares) + fee
+                    final_total = calculated_total
+                    st.info(f"💡 系統自動計算總金額：{calculated_total:,.0f} 元")
+
+            # 3. 寫入資料庫
+            new_row = [str(date), ticker, db_type, db_strat, db_action, final_price, final_shares, fee, final_total, note]
             ws_records.append_row(new_row)
-            st.success("已儲存！請重新整理頁面。")
+            
+            st.success("✅ 交易已儲存！")
             st.cache_data.clear()
 
     st.divider()
@@ -191,10 +219,10 @@ with st.sidebar:
                 ws_funds.update_cell(cell.row, 3, str(datetime.now().date()))
             except:
                 ws_funds.append_row([f_ticker, f_net_val, str(datetime.now().date())])
-            st.success(f"{f_ticker} 淨值已更新！")
+            st.success(f"✅ {f_ticker} 淨值已更新！")
             st.cache_data.clear()
 
-st.title("📊 全能投資追蹤器 v1.1 (Cloud)")
+st.title("📊 全能投資追蹤器 v1.2")
 df, df_funds, usd_rate = load_data()
 
 if df.empty:
@@ -206,11 +234,11 @@ else:
         total_unrealized = portfolio_df['未實現損益'].sum()
         total_dividend = portfolio_df['已領股息'].sum()
         
-        col1, col2, col3, col4 = st.columns(4)
+        # 移除匯率顯示，改為 3 欄佈局
+        col1, col2, col3 = st.columns(3)
         col1.metric("總市值 (TWD)", f"${total_market_value:,.0f}")
         col2.metric("未實現損益", f"${total_unrealized:,.0f}", delta_color="normal")
         col3.metric("今年已領股息", f"${total_dividend:,.0f}")
-        col4.metric("目前 USD/TWD 匯率", f"{usd_rate:.2f}")
         
         st.subheader("🎯 資產策略分析")
         tab1, tab2 = st.tabs(["💰 現金流資產 (存股+基金)", "🚀 資本利得資產 (波段)"])
