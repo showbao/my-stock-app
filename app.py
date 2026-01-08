@@ -1,5 +1,5 @@
-# Version: v3.3
-# CTOSignature: No Modals - All Inline Forms (Expanders/Tabs), Unified Fee Logic
+# Version: v3.4
+# CTOSignature: Unified Tabs for All Inputs, Strategy Field Restored, Integrated Dashboard
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -253,12 +253,10 @@ def handle_transaction_submit(date_in, ticker, type_display, strategy_list, acti
     final_fee = fee
     final_total = total_amt
 
-    # 手續費自動計算
     if final_fee == 0 and db_action in ["Buy", "Sell"]:
         calculated_fee = int(price * shares * 0.001425)
         final_fee = calculated_fee
 
-    # 總金額自動計算 (含稅)
     if db_action == "Dividend":
         final_shares = 0
         final_price = 0
@@ -287,14 +285,31 @@ def handle_transaction_submit(date_in, ticker, type_display, strategy_list, acti
 # ==========================================
 # 4. 前端介面組合 (Main Layout)
 # ==========================================
-st.title("📊 投資戰情室 v3.3")
+st.title("📊 投資戰情室 v3.4")
 
-# --- Top Area: 原地展開的新增區塊 ---
-with st.expander("📝 新增交易 / 更新淨值 (點擊展開)", expanded=False):
-    t_add1, t_add2 = st.tabs(["➕ 新增股票/基金交易", "💵 更新基金淨值"])
+# --- 載入資料 ---
+df, df_funds, usd_rate = load_data()
+_df = df.copy() 
+all_tickers = df['Ticker'].unique().tolist() if not df.empty else []
+
+# --- 指揮中心 (整合篩選與新增) ---
+with st.expander("🛠️ 指揮中心 (篩選 / 新增 / 更新)", expanded=True):
     
-    # Tab 1: 交易輸入 (統一介面)
-    with t_add1:
+    # 使用 Tabs 分流不同功能
+    cmd_tab1, cmd_tab2, cmd_tab3 = st.tabs(["📊 戰情看板 & 篩選", "➕ 新增交易", "💵 基金淨值"])
+    
+    # [TAB 1] 戰情看板與篩選
+    with cmd_tab1:
+        c_s1, c_s2, c_s3 = st.columns([1, 1, 2])
+        with c_s1:
+            analysis_start = st.date_input("開始日期", value=date(datetime.now().year, 1, 1))
+        with c_s2:
+            analysis_end = st.date_input("結束日期", value=datetime.now().date())
+        with c_s3:
+            selected_tickers_dashboard = st.multiselect("篩選代號 (僅影響看板)", all_tickers)
+
+    # [TAB 2] 全域新增交易
+    with cmd_tab2:
         with st.form("top_entry_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
@@ -302,6 +317,7 @@ with st.expander("📝 新增交易 / 更新淨值 (點擊展開)", expanded=Fal
                 ticker = st.text_input("代號", key="top_ticker").upper()
                 typ_display = st.selectbox("種類", ["股票 (Stock)", "基金 (Fund)"], key="top_type")
             with col2:
+                # 這裡加入了策略選擇
                 strategy_opts = ["存股 (Dividend)", "波段 (Swing)"]
                 strategy_display = st.multiselect("策略", strategy_opts, default=["存股 (Dividend)"], key="top_strat")
                 action_display = st.selectbox("動作", ["買入 (Buy)", "賣出 (Sell)", "領息 (Dividend)", "分割/減資 (Split)"], key="top_act")
@@ -327,8 +343,8 @@ with st.expander("📝 新增交易 / 更新淨值 (點擊展開)", expanded=Fal
                         st.success(f"已儲存 {ticker}！")
                         st.cache_data.clear()
 
-    # Tab 2: 基金更新
-    with t_add2:
+    # [TAB 3] 基金淨值更新
+    with cmd_tab3:
         with st.form("top_fund_form", clear_on_submit=True):
             c1, c2, c3 = st.columns([1, 1, 1])
             with c1:
@@ -349,75 +365,65 @@ with st.expander("📝 新增交易 / 更新淨值 (點擊展開)", expanded=Fal
                 st.success(f"{f_ticker} 更新成功！")
                 st.cache_data.clear()
 
+# --- 戰情看板邏輯 ---
+if not df.empty:
+    full_portfolio_df = calculate_portfolio(df, df_funds, usd_rate)
+    summary, period_df, years_df = analyze_period(df, analysis_start, analysis_end, selected_tickers_dashboard, full_portfolio_df)
+    
+    if summary:
+        st.markdown("#### 📈 績效指標")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("區間已領股息", f"${summary['總領股息']:,.0f}")
+        k2.metric("區間淨現金流", f"${summary['淨現金流']:,.0f}")
+        if summary['年化回收率%'] is not None:
+            k3.metric("年化報酬率 (CAGR)", f"{summary['年化回收率%']:.2f}%")
+        else:
+            k3.metric("區間總回報", f"{summary['總回報率%']:.2f}%")
+        k4.metric("目前庫存價值", f"${summary['期末庫存市值']:,.0f}")
 
-# --- 載入資料 ---
-df, df_funds, usd_rate = load_data()
-_df = df.copy() 
-all_tickers = df['Ticker'].unique().tolist() if not df.empty else []
-
-# --- 戰情分析區 ---
-with st.expander("🔍 全域戰情分析 & 篩選器", expanded=True):
-    c_s1, c_s2, c_s3 = st.columns([1, 1, 2])
-    with c_s1:
-        analysis_start = st.date_input("開始日期", value=date(datetime.now().year, 1, 1))
-    with c_s2:
-        analysis_end = st.date_input("結束日期", value=datetime.now().date())
-    with c_s3:
-        selected_tickers_dashboard = st.multiselect("篩選代號 (僅影響此分析區塊)", all_tickers)
-
-    if not df.empty:
-        full_portfolio_df = calculate_portfolio(df, df_funds, usd_rate)
-        summary, period_df, years_df = analyze_period(df, analysis_start, analysis_end, selected_tickers_dashboard, full_portfolio_df)
+        if not years_df.empty and len(years_df) > 1:
+            st.markdown("#### 📅 年度分列比較")
+            st.dataframe(years_df, use_container_width=True, hide_index=True)
         
-        if summary:
-            st.markdown("#### 📈 績效指標")
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("區間已領股息", f"${summary['總領股息']:,.0f}")
-            k2.metric("區間淨現金流", f"${summary['淨現金流']:,.0f}")
-            if summary['年化回收率%'] is not None:
-                k3.metric("年化報酬率 (CAGR)", f"{summary['年化回收率%']:.2f}%")
-            else:
-                k3.metric("區間總回報", f"{summary['總回報率%']:.2f}%")
-            k4.metric("目前庫存價值", f"${summary['期末庫存市值']:,.0f}")
-
-            if not years_df.empty and len(years_df) > 1:
-                st.markdown("#### 📅 年度分列比較")
-                st.dataframe(years_df, use_container_width=True, hide_index=True)
-            
-            # 分面詳情 (Inline Drill-down)
-            if selected_tickers_dashboard:
-                st.divider()
-                st.markdown("#### 🏷️ 個股交易詳情 (分析區)")
-                tabs = st.tabs(selected_tickers_dashboard)
-                for i, ticker in enumerate(selected_tickers_dashboard):
-                    with tabs[i]:
+        # 分面詳情 (Inline Drill-down)
+        if selected_tickers_dashboard:
+            st.divider()
+            st.markdown("#### 🏷️ 個股交易詳情 (分析區)")
+            tabs = st.tabs(selected_tickers_dashboard)
+            for i, ticker in enumerate(selected_tickers_dashboard):
+                with tabs[i]:
+                    # [修改 1] 個股詳情現在使用分頁：歷史紀錄 | 快速新增
+                    t_hist, t_add = st.tabs(["📜 歷史紀錄", "⚡ 快速新增"])
+                    
+                    with t_hist:
                         ticker_history = df[df['Ticker'] == ticker].sort_values('Date', ascending=False)
                         display_history = ticker_history[['Date', 'Action', 'Strategy', 'Price', 'Shares', 'Total_Amount', 'Note']].copy()
                         display_history.columns = ['日期', '動作', '策略', '單價', '股數', '總金額', '備註']
                         st.dataframe(display_history, use_container_width=True, hide_index=True)
-                        
-                        st.caption(f"⚡ 快速新增 {ticker} 交易：")
-                        # 這裡直接放置表單，不彈出視窗
+
+                    with t_add:
+                        # [修改 3] 補上策略選項
                         with st.form(f"dash_add_{ticker}", clear_on_submit=True):
                             dc1, dc2, dc3, dc4 = st.columns(4)
                             with dc1:
                                 d_date = st.date_input("日期", key=f"d_date_{ticker}")
                                 d_action = st.selectbox("動作", ["買入 (Buy)", "賣出 (Sell)", "領息 (Dividend)"], key=f"d_act_{ticker}")
                             with dc2:
-                                d_shares = st.number_input("股數", step=100.0, key=f"d_share_{ticker}")
+                                # 加入策略
+                                d_strat = st.multiselect("策略", ["存股 (Dividend)", "波段 (Swing)"], default=["存股 (Dividend)"], key=f"d_st_{ticker}")
                                 d_price = st.number_input("單價", step=0.1, key=f"d_price_{ticker}")
                             with dc3:
+                                d_shares = st.number_input("股數", step=100.0, key=f"d_share_{ticker}")
                                 d_fee = st.number_input("手續費 (0自動算)", min_value=0, key=f"d_fee_{ticker}")
-                                d_total = st.number_input("總金額 (0自動算)", step=1000.0, key=f"d_tot_{ticker}")
                             with dc4:
+                                d_total = st.number_input("總金額 (0自動算)", step=1000.0, key=f"d_tot_{ticker}")
                                 d_note = st.text_input("備註", key=f"d_note_{ticker}")
                                 st.write("")
                                 d_submit = st.form_submit_button("新增")
                             
                             if d_submit:
-                                # 預設參數
                                 success = handle_transaction_submit(
-                                    d_date, ticker, "股票 (Stock)", ["存股 (Dividend)"], d_action, 
+                                    d_date, ticker, "股票 (Stock)", d_strat, d_action, 
                                     d_price, d_shares, d_fee, d_total, d_note
                                 )
                                 if success:
@@ -445,6 +451,7 @@ if not df.empty and not full_portfolio_df.empty:
         key="inventory_table"
     )
     
+    # --- 下方展開區 ---
     if len(event.selection.rows) > 0:
         selected_index = event.selection.rows[0]
         selected_row = full_portfolio_df.iloc[selected_index]
@@ -453,6 +460,7 @@ if not df.empty and not full_portfolio_df.empty:
         st.divider()
         st.markdown(f"### 📂 {target_ticker} 交易詳情")
         
+        # [修改 1] 個股詳情使用分頁
         t1, t2 = st.tabs(["📜 歷史紀錄", "⚡ 快速新增"])
         
         with t1:
@@ -465,25 +473,28 @@ if not df.empty and not full_portfolio_df.empty:
                 st.info("無交易紀錄")
         
         with t2:
+            # [修改 3] 補上策略選項
             with st.form(f"quick_add_inline_{target_ticker}", clear_on_submit=True):
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
                     q_date = st.date_input("日期")
                     q_action = st.selectbox("動作", ["買入 (Buy)", "賣出 (Sell)", "領息 (Dividend)"])
                 with c2:
-                    q_shares = st.number_input("股數", step=100.0)
+                    # 加入策略多選
+                    q_strat = st.multiselect("策略", ["存股 (Dividend)", "波段 (Swing)"], default=["存股 (Dividend)"])
                     q_price = st.number_input("單價", step=0.1)
                 with c3:
+                    q_shares = st.number_input("股數", step=100.0)
                     q_fee = st.number_input("手續費 (0自動算)", min_value=0)
-                    q_total = st.number_input("總金額 (0自動算)", step=1000.0)
                 with c4:
+                    q_total = st.number_input("總金額 (0自動算)", step=1000.0)
                     q_note = st.text_input("備註")
                     st.write("")
                     q_submit = st.form_submit_button(f"新增 {target_ticker}")
                 
                 if q_submit:
                     success = handle_transaction_submit(
-                        q_date, target_ticker, "股票 (Stock)", ["存股 (Dividend)"], q_action, 
+                        q_date, target_ticker, "股票 (Stock)", q_strat, q_action, 
                         q_price, q_shares, q_fee, q_total, q_note
                     )
                     if success:
