@@ -1,5 +1,5 @@
-# Version: v4.0 (Final Complete)
-# CTOSignature: v3.6 Metrics + v4.0 Visualizations + Unified UI + Auto Logic
+# Version: v4.1 (Fix Altair Error)
+# CTOSignature: Fix Altair transform_fold ValueError by using Pandas melt
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -86,7 +86,6 @@ def load_data():
     return df, df_funds, current_usd_rate
 
 def xirr(transactions):
-    """計算 XIRR: transactions = [(date, amount), ...]"""
     if not transactions:
         return None
     dates = [t[0] for t in transactions]
@@ -372,7 +371,7 @@ def handle_transaction_submit(date_in, ticker, type_display, strategy_list, acti
     return True
 
 # ==========================================
-# 4. 儀表板渲染 (Context-Aware + Charts)
+# 4. 儀表板渲染 (Fix: Use Pandas Melt for Altair)
 # ==========================================
 def render_dashboard_tab(df, start_date, end_date, selected_tickers, strategy_filter, full_portfolio_df, trade_log_df):
     
@@ -418,30 +417,24 @@ def render_dashboard_tab(df, start_date, end_date, selected_tickers, strategy_fi
 
         # --- 2. 策略專屬圖表 (Visualizations) ---
         
-        # A. 總覽圖：資產堆疊圖 (Stacked Area)
+        # A. 總覽圖：資產堆疊圖 (Stacked Area) - FIX APPLIED HERE
         if strategy_filter is None:
             st.markdown("##### 🏔️ 資產累積趨勢 (本金 vs 獲利 vs 股息)")
-            # 製作圖表資料
+            
             chart_data = []
             cum_cost = 0
             cum_div = 0
             cum_realized = 0
             
-            # 需要重新依時間排序跑一遍累積
             sorted_df = period_df.sort_values('Date')
             for _, r in sorted_df.iterrows():
                 act = r['Action']
                 amt = r['Total_Amount']
-                # 這裡簡化邏輯：買入增加本金，賣出減少本金增加損益，股息增加股息
-                # 為了精確，應該用 analyze_period_advanced 的邏輯，但為了圖表快速呈現：
                 if act == 'Buy':
                     cum_cost += amt
                 elif act == 'Sell':
-                    # 假設賣出回本大於成本的部分是獲利 (這裡無法精確抓到每一筆的成本，僅做示意流向)
-                    # 更好的方式是用 trade_log 但那樣日期會對不上
-                    # 這裡用概略法：賣出時，假設本金依比例減少，剩下是損益
-                    # 為了圖表穩定，這裡顯示 "淨投入 (Net Invested)" 和 "累積回收 (Net Return)"
-                    cum_cost -= (amt * 0.8) # 假設
+                    # 簡易估算: 假設賣出回本8成本金, 2成獲利
+                    cum_cost -= (amt * 0.8) 
                     cum_realized += (amt * 0.2)
                 elif act == 'Dividend':
                     cum_div += amt
@@ -455,14 +448,13 @@ def render_dashboard_tab(df, start_date, end_date, selected_tickers, strategy_fi
             
             if chart_data:
                 chart_df = pd.DataFrame(chart_data)
-                # 使用 Altair 畫堆疊圖
-                chart = alt.Chart(chart_df).transform_fold(
-                    ['Net Invested', 'Dividend', 'Realized Gain'],
-                    as_=['Category', 'Amount']
-                ).mark_area().encode(
-                    x='Date:T',
-                    y='Amount:Q',
-                    color=alt.Color('Category:N', scale=alt.Scale(scheme='category10')),
+                # [Fix] 使用 Pandas melt 來準備資料，解決 Altair transform_fold 報錯問題
+                chart_df_long = chart_df.melt('Date', var_name='Category', value_name='Amount')
+                
+                chart = alt.Chart(chart_df_long).mark_area().encode(
+                    x=alt.X('Date:T', title='日期'),
+                    y=alt.Y('Amount:Q', title='金額'),
+                    color=alt.Color('Category:N', title='類別', scale=alt.Scale(scheme='category10')),
                     tooltip=['Date', 'Category', 'Amount']
                 ).properties(height=300)
                 st.altair_chart(chart, use_container_width=True)
@@ -471,7 +463,6 @@ def render_dashboard_tab(df, start_date, end_date, selected_tickers, strategy_fi
         elif strategy_filter == "Dividend":
             st.markdown("##### 💰 歷年股息成長")
             if not years_df.empty:
-                # 轉換資料格式給 Bar Chart
                 bar_data = years_df[['年度', '領息']].copy()
                 bar_data['領息'] = bar_data['領息'].str.replace('$','').str.replace(',','').astype(float)
                 
@@ -486,20 +477,17 @@ def render_dashboard_tab(df, start_date, end_date, selected_tickers, strategy_fi
         elif "Swing" in strategy_filter:
             st.markdown("##### 📈 交易損益曲線 & 落點")
             if not trade_log_df.empty:
-                # 篩選策略
                 swing_trades = trade_log_df[trade_log_df['Strategy'].str.contains(strategy_filter, na=False)]
                 if not swing_trades.empty:
                     swing_trades = swing_trades.sort_values('Date')
                     swing_trades['Cumulative PnL'] = swing_trades['PnL'].cumsum()
                     
-                    # 1. 曲線圖
                     line = alt.Chart(swing_trades).mark_line(color='purple').encode(
                         x='Date:T',
                         y='Cumulative PnL:Q',
                         tooltip=['Date', 'Cumulative PnL']
                     )
                     
-                    # 2. 散佈圖
                     points = alt.Chart(swing_trades).mark_circle(size=60).encode(
                         x='Date:T',
                         y='PnL:Q',
@@ -519,7 +507,7 @@ def render_dashboard_tab(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式
 # ==========================================
-st.title("📊 投資戰情室 v4.0")
+st.title("📊 投資戰情室 v4.1")
 
 df, df_funds, usd_rate = load_data()
 all_tickers = df['Ticker'].unique().tolist() if not df.empty else []
@@ -622,109 +610,4 @@ if not df.empty:
         for i, ticker in enumerate(selected_tickers_dashboard):
             with tabs[4+i]:
                 st.markdown(f"#### 🔍 {ticker} 個股分析")
-                render_dashboard_tab(df, analysis_start, analysis_end, [ticker], None, full_portfolio_df, trade_log_df)
-                st.divider()
-                t_hist, t_add = st.tabs(["📜 歷史紀錄", "⚡ 快速新增"])
-                with t_hist:
-                    ticker_history = df[df['Ticker'] == ticker].sort_values('Date', ascending=False)
-                    display_history = ticker_history[['Date', 'Action', 'Strategy', 'Price', 'Shares', 'Total_Amount', 'Note']].copy()
-                    display_history.columns = ['日期', '動作', '策略', '單價', '股數', '總金額', '備註']
-                    st.dataframe(display_history, use_container_width=True, hide_index=True)
-                with t_add:
-                    with st.form(f"dash_add_{ticker}", clear_on_submit=True):
-                        dc1, dc2, dc3, dc4 = st.columns(4)
-                        with dc1:
-                            d_date = st.date_input("日期", key=f"d_date_{ticker}")
-                            d_action = st.selectbox("動作", ["買入 (Buy)", "賣出 (Sell)", "領息 (Dividend)"], key=f"d_act_{ticker}")
-                        with dc2:
-                            strat_opts_dyn = ["存股 (Dividend)", "波段-短期 (Swing Short)", "波段-長期 (Swing Long)"]
-                            d_strat = st.multiselect("策略", strat_opts_dyn, default=["存股 (Dividend)"], key=f"d_st_{ticker}")
-                            d_price = st.number_input("單價", step=0.1, key=f"d_price_{ticker}")
-                        with dc3:
-                            d_shares = st.number_input("股數", step=100.0, key=f"d_share_{ticker}")
-                            d_fee = st.number_input("手續費 (0自動算)", min_value=0, key=f"d_fee_{ticker}")
-                        with dc4:
-                            d_total = st.number_input("總金額 (0自動算)", step=1000.0, key=f"d_tot_{ticker}")
-                            d_note = st.text_input("備註", key=f"d_note_{ticker}")
-                            st.write("")
-                            d_submit = st.form_submit_button("新增")
-                        if d_submit:
-                            success = handle_transaction_submit(d_date, ticker, "股票 (Stock)", d_strat, d_action, d_price, d_shares, d_fee, d_total, d_note)
-                            if success:
-                                st.success("已新增！請重新整理。")
-                                st.cache_data.clear()
-
-# --- 庫存總覽 ---
-st.markdown("### 📦 現有庫存總覽")
-if not df.empty and not full_portfolio_df.empty:
-    
-    # 庫存策略圓餅圖 (New in v4.0)
-    if not full_portfolio_df.empty:
-        # 簡單資料處理：依策略加總總成本
-        pie_data = full_portfolio_df.groupby('策略')['總成本'].sum().reset_index()
-        pie_chart = alt.Chart(pie_data).mark_arc(innerRadius=50).encode(
-            theta=alt.Theta(field="總成本", type="quantitative"),
-            color=alt.Color(field="策略", type="nominal"),
-            tooltip=['策略', '總成本']
-        ).properties(title="策略資金配置 (依成本)")
-        
-        c_pie1, c_pie2 = st.columns([1, 2])
-        with c_pie1:
-             st.altair_chart(pie_chart, use_container_width=True)
-        with c_pie2:
-            # 庫存數據
-            total_mv = full_portfolio_df['市值'].sum()
-            total_cost = full_portfolio_df['總成本'].sum()
-            total_pl = full_portfolio_df['帳面損益'].sum()
-            st.info(f"📊 **合計 (全持股)**｜ 市值: **${total_mv:,.0f}** ｜ 成本: **${total_cost:,.0f}** ｜ 損益: **${total_pl:,.0f}**")
-            
-            cols_show = ["代號", "庫存", "平均成本", "市價", "市值", "帳面損益", "含息總報%", "策略"]
-            event = st.dataframe(
-                full_portfolio_df[cols_show],
-                use_container_width=True,
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="inventory_table"
-            )
-    
-    if len(event.selection.rows) > 0:
-        selected_index = event.selection.rows[0]
-        selected_row = full_portfolio_df.iloc[selected_index]
-        target_ticker = selected_row['代號']
-        st.divider()
-        st.markdown(f"### 📂 {target_ticker} 交易詳情")
-        t1, t2 = st.tabs(["📜 歷史紀錄", "⚡ 快速新增"])
-        with t1:
-            target_df = df[df['Ticker'] == target_ticker].sort_values('Date', ascending=False)
-            if not target_df.empty:
-                view_df = target_df[['Date', 'Action', 'Strategy', 'Price', 'Shares', 'Fee', 'Total_Amount', 'Note']].copy()
-                view_df.columns = ['日期', '動作', '策略', '單價', '股數', '手續費', '總金額', '備註']
-                st.dataframe(view_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("無交易紀錄")
-        with t2:
-            with st.form(f"quick_add_inline_{target_ticker}", clear_on_submit=True):
-                c1, c2, c3, c4 = st.columns(4)
-                with c1:
-                    q_date = st.date_input("日期")
-                    q_action = st.selectbox("動作", ["買入 (Buy)", "賣出 (Sell)", "領息 (Dividend)"])
-                with c2:
-                    strat_opts_inv = ["存股 (Dividend)", "波段-短期 (Swing Short)", "波段-長期 (Swing Long)"]
-                    q_strat = st.multiselect("策略", strat_opts_inv, default=["存股 (Dividend)"])
-                    q_price = st.number_input("單價", step=0.1)
-                with c3:
-                    q_shares = st.number_input("股數", step=100.0)
-                    q_fee = st.number_input("手續費 (0自動算)", min_value=0)
-                with c4:
-                    q_total = st.number_input("總金額 (0自動算)", step=1000.0)
-                    q_note = st.text_input("備註")
-                    st.write("")
-                    q_submit = st.form_submit_button(f"新增 {target_ticker}")
-                if q_submit:
-                    success = handle_transaction_submit(q_date, target_ticker, "股票 (Stock)", q_strat, q_action, q_price, q_shares, q_fee, q_total, q_note)
-                    if success:
-                        st.success("已新增！請重新整理頁面。")
-                        st.cache_data.clear()
-else:
-    st.info("尚無庫存或交易資料。")
+                render_dashboard_tab(df, analysis_start, analysis_end, [ticker], None
