@@ -3,4 +3,5 @@ pandas
 yfinance
 gspread
 oauth2client
-plotly
+scipy
+altair
