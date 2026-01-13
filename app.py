@@ -1,5 +1,5 @@
-# Version: v4.1 (Fix Altair Error)
-# CTOSignature: Fix Altair transform_fold ValueError by using Pandas melt
+# Version: v5.0 (Final Architecture Upgrade)
+# CTOSignature: Fully Localized (Chinese), Layout Restructuring, Smart Strategy Detection
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -37,7 +37,7 @@ ws_records = sh.worksheet("Records")
 ws_funds = sh.worksheet("Fund_Updates")
 
 # ==========================================
-# 2. 核心邏輯函數
+# 2. 核心邏輯函數 (含中文化處理)
 # ==========================================
 
 @st.cache_data(ttl=3600) 
@@ -68,6 +68,40 @@ def get_stock_data(ticker):
     except:
         return 0.0, 0.0
 
+def normalize_data(df):
+    """
+    資料標準化：將舊的英文資料轉為中文，統一後端邏輯
+    """
+    if df.empty: return df
+    
+    # 動作對照
+    act_map = {
+        'Buy': '買入', 'Sell': '賣出', 'Dividend': '領息', 'Split': '分割',
+        'Buy (Buy)': '買入', 'Sell (Sell)': '賣出' # 防呆
+    }
+    # 策略對照 (舊資料轉新中文)
+    strat_map = {
+        'Dividend': '存股',
+        'Swing': '波段-短期', # 假設舊的 Swing 歸類為短期，或可手動調整
+        'Swing Short': '波段-短期',
+        'Swing Long': '波段-長期'
+    }
+    # 種類對照
+    type_map = {'Stock': '股票', 'Fund': '基金'}
+
+    # 執行取代 (如果欄位已經是中文則不受影響)
+    if 'Action' in df.columns:
+        df['Action'] = df['Action'].replace(act_map)
+    if 'Strategy' in df.columns:
+        # 策略可能是複選字串 "Dividend,Swing"，這裡簡單處理單一取代，若複雜需拆解
+        # 這裡假設主要策略單純。若有逗號，建議在 Excel 修正或以此邏輯跑
+        for old, new in strat_map.items():
+            df['Strategy'] = df['Strategy'].str.replace(old, new, regex=False)
+    if 'Type' in df.columns:
+        df['Type'] = df['Type'].replace(type_map)
+        
+    return df
+
 def load_data():
     records_data = ws_records.get_all_records()
     df = pd.DataFrame(records_data)
@@ -77,29 +111,32 @@ def load_data():
     if df.empty:
         return df, df_funds, 32.0
         
+    # 轉數值
     numeric_cols = ['Price', 'Shares', 'Fee', 'Total_Amount']
     for col in numeric_cols:
+        # 移除可能存在的逗號或錢字號
+        if df[col].dtype == object:
+             df[col] = df[col].astype(str).str.replace(',','').str.replace('$','')
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     
     df['Date'] = pd.to_datetime(df['Date']).dt.date
+    
+    # --- 關鍵步驟：中文化標準化 ---
+    df = normalize_data(df)
+    # ---------------------------
+    
     current_usd_rate = get_usd_twd_rate()
     return df, df_funds, current_usd_rate
 
 def xirr(transactions):
-    if not transactions:
-        return None
+    if not transactions: return None
     dates = [t[0] for t in transactions]
     amounts = [t[1] for t in transactions]
-    
-    if min(amounts) >= 0 or max(amounts) <= 0:
-        return None
-
+    if min(amounts) >= 0 or max(amounts) <= 0: return None
     def xnpv(rate, amounts, dates):
-        if rate <= -1.0:
-            return float('inf')
+        if rate <= -1.0: return float('inf')
         d0 = dates[0]
         return sum([a / (1.0 + rate)**((d - d0).days / 365.0) for a, d in zip(amounts, dates)])
-
     try:
         return optimize.newton(lambda r: xnpv(r, amounts, dates), 0.1)
     except:
@@ -113,27 +150,28 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
     
     for _, row in df.iterrows():
         ticker = row['Ticker']
-        action = row['Action']
+        action = row['Action'] # 已經是中文
         qty = row['Shares']
         amount = row['Total_Amount']
         date_txn = row['Date']
         typ = row['Type']
+        strat = str(row['Strategy'])
         
         if ticker not in portfolio:
             portfolio[ticker] = {
                 'shares': 0, 'total_cost': 0, 'realized_pl': 0, 
                 'dividend_collected': 0, 'type': typ, 
-                'strategy': str(row['Strategy'])
+                'strategy': strat
             }
-            
+        
         p = portfolio[ticker]
-        p['strategy'] = str(row['Strategy']) 
+        p['strategy'] = strat # 更新為最新策略
 
-        if action == 'Buy':
+        if action == '買入':
             p['shares'] += qty
             p['total_cost'] += amount
             
-        elif action == 'Sell':
+        elif action == '賣出':
             if p['shares'] > 0:
                 pct_sold = qty / p['shares']
                 cost_of_sold_shares = p['total_cost'] * pct_sold
@@ -155,10 +193,10 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
                     p['shares'] = 0
                     p['total_cost'] = 0
                     
-        elif action == 'Dividend':
+        elif action == '領息':
             p['dividend_collected'] += amount
             
-        elif action == 'Split': 
+        elif action == '分割': 
             p['shares'] += qty
             if p['shares'] <= 0.001:
                 p['shares'] = 0
@@ -171,10 +209,10 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
         volatility = 0
         
         if data['shares'] > 0.001:
-            if data['type'] == 'Stock':
+            if data['type'] == '股票':
                 current_price, volatility = get_stock_data(ticker)
                 market_value = current_price * data['shares']
-            elif data['type'] == 'Fund':
+            elif data['type'] == '基金':
                 if not df_funds.empty and ticker in df_funds['Ticker'].values:
                     usd_net = df_funds[df_funds['Ticker'] == ticker]['Net_Value_USD'].values[0]
                     current_price = usd_net * current_usd_rate
@@ -218,13 +256,14 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     period_df = df[mask].copy()
     if period_df.empty: return None, pd.DataFrame(), pd.DataFrame()
 
-    total_dividend = period_df[period_df['Action'] == 'Dividend']['Total_Amount'].sum()
-    total_buy = period_df[period_df['Action'] == 'Buy']['Total_Amount'].sum()
-    total_sell = period_df[period_df['Action'] == 'Sell']['Total_Amount'].sum()
+    total_dividend = period_df[period_df['Action'] == '領息']['Total_Amount'].sum()
+    total_buy = period_df[period_df['Action'] == '買入']['Total_Amount'].sum()
+    total_sell = period_df[period_df['Action'] == '賣出']['Total_Amount'].sum()
     
     ending_inventory_value = 0
     total_cost_basis = 0
     is_current = end_date >= datetime.now().date()
+    
     if is_current and not current_portfolio_df.empty:
         target_inv = current_portfolio_df
         if selected_tickers:
@@ -234,7 +273,6 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
         ending_inventory_value = target_inv['市值'].sum()
         total_cost_basis = target_inv['總成本'].sum()
 
-    # 指標運算
     win_rate = 0
     profit_factor = 0
     realized_pnl_period = 0
@@ -265,9 +303,9 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
         d = row['Date']
         amt = row['Total_Amount']
         act = row['Action']
-        if act == 'Buy':
+        if act == '買入':
             cash_flows.append((d, -amt))
-        elif act in ['Sell', 'Dividend']:
+        elif act in ['賣出', '領息']:
             cash_flows.append((d, amt))
             
     if ending_inventory_value > 0:
@@ -304,9 +342,9 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     for y in range(start_y, end_y + 1):
         y_df = period_df[pd.to_datetime(period_df['Date']).dt.year == y]
         if not y_df.empty:
-            y_div = y_df[y_df['Action'] == 'Dividend']['Total_Amount'].sum()
-            y_buy = y_df[y_df['Action'] == 'Buy']['Total_Amount'].sum()
-            y_sell = y_df[y_df['Action'] == 'Sell']['Total_Amount'].sum()
+            y_div = y_df[y_df['Action'] == '領息']['Total_Amount'].sum()
+            y_buy = y_df[y_df['Action'] == '買入']['Total_Amount'].sum()
+            y_sell = y_df[y_df['Action'] == '賣出']['Total_Amount'].sum()
             y_net = (y_sell + y_div) - y_buy
             years_data.append({
                 "年度": str(y),
@@ -319,59 +357,52 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     return summary, period_df, years_df
 
 # ==========================================
-# 3. 交易輸入處理
+# 3. 交易輸入處理 (中文寫入)
 # ==========================================
 
 def handle_transaction_submit(date_in, ticker, type_display, strategy_list, action_display, price, shares, fee, total_amt, note):
-    typ_map = {"股票 (Stock)": "Stock", "基金 (Fund)": "Fund"}
-    act_map = {"買入 (Buy)": "Buy", "賣出 (Sell)": "Sell", "領息 (Dividend)": "Dividend", "分割/減資 (Split)": "Split"}
-    strat_map = {
-        "存股 (Dividend)": "Dividend", 
-        "波段-短期 (Swing Short)": "Swing Short",
-        "波段-長期 (Swing Long)": "Swing Long"
-    }
+    # 此處接收的 input 已經是中文，直接寫入即可，或是做簡單轉換確保格式
     
-    selected_strats = [strat_map[s] for s in strategy_list]
-    db_strat = ",".join(selected_strats)
-    db_type = typ_map[type_display]
-    db_action = act_map[action_display]
+    # 策略列表轉字串
+    db_strat = ",".join(strategy_list)
     
     final_shares = shares
     final_price = price
     final_fee = fee
     final_total = total_amt
 
-    if final_fee == 0 and db_action in ["Buy", "Sell"]:
+    # 動作邏輯 (注意這裡用中文判斷)
+    if final_fee == 0 and action_display in ["買入", "賣出"]:
         calculated_fee = int(price * shares * 0.001425)
         final_fee = calculated_fee
 
-    if db_action == "Dividend":
+    if action_display == "領息":
         final_shares = 0
         final_price = 0
         if final_total == 0:
                 st.error("領息金額不能為 0")
                 return False
-    elif db_action == "Split":
+    elif action_display == "分割":
         final_total = 0
         final_price = 0
     else:
         if final_total == 0:
             basic_amt = price * shares
-            if db_action == "Buy":
+            if action_display == "買入":
                 final_total = basic_amt + final_fee
-            elif db_action == "Sell":
+            elif action_display == "賣出":
                 tax_rate = 0.003
                 tax = int(basic_amt * tax_rate)
                 final_total = basic_amt - final_fee - tax
                 if tax > 0:
                     note = f"{note} (系統自動扣除證交稅約 ${tax})".strip()
 
-    new_row = [str(date_in), ticker, db_type, db_strat, db_action, final_price, final_shares, final_fee, final_total, note]
+    new_row = [str(date_in), ticker, type_display, db_strat, action_display, final_price, final_shares, final_fee, final_total, note]
     ws_records.append_row(new_row)
     return True
 
 # ==========================================
-# 4. 儀表板渲染 (Fix: Use Pandas Melt for Altair)
+# 4. 儀表板渲染組件
 # ==========================================
 def render_dashboard_tab(df, start_date, end_date, selected_tickers, strategy_filter, full_portfolio_df, trade_log_df):
     
@@ -380,124 +411,79 @@ def render_dashboard_tab(df, start_date, end_date, selected_tickers, strategy_fi
     )
     
     if summary:
-        # --- 1. 核心指標卡片 ---
+        # 指標卡片
         k1, k2, k3, k4 = st.columns(4)
         
-        if strategy_filter == "Swing Short": 
+        # 根據策略顯示不同標題
+        if strategy_filter == "波段-短期": 
             k1.metric("已實現損益", f"${summary['已實現損益']:,.0f}", delta_color="normal")
             k2.metric("交易勝率", f"{summary['勝率%']:.1f}%")
             k3.metric("獲利因子", f"{summary['獲利因子']:.2f}")
             k4.metric("區間淨現金流", f"${summary['淨現金流']:,.0f}")
             
-        elif strategy_filter == "Swing Long": 
+        elif strategy_filter == "波段-長期": 
             k1.metric("總資產成長", f"${summary['總資產成長']:,.0f}")
-            if summary['XIRR%']:
-                k2.metric("年化報酬 (XIRR)", f"{summary['XIRR%']:.2f}%")
-            else:
-                k2.metric("年化報酬", "N/A")
+            k2.metric("年化報酬 (XIRR)", f"{summary['XIRR%']:.2f}%" if summary['XIRR%'] else "N/A")
             k3.metric("目前庫存市值", f"${summary['期末庫存市值']:,.0f}")
             k4.metric("總領股息", f"${summary['總領股息']:,.0f}")
             
-        elif strategy_filter == "Dividend": 
+        elif strategy_filter == "存股": 
             k1.metric("成本殖利率 (YoC)", f"{summary['YoC%']:.2f}%")
             k2.metric("累積總現金流", f"${summary['總領股息']:,.0f}")
             k3.metric("回本進度", f"{summary['回本率%']:.1f}%")
             k4.metric("庫存市值", f"${summary['期末庫存市值']:,.0f}")
             
-        else: # 總覽
+        else: # 總覽 (或個股)
             k1.metric("總資產成長", f"${summary['總資產成長']:,.0f}")
             k2.metric("總領股息", f"${summary['總領股息']:,.0f}")
             k3.metric("淨現金流", f"${summary['淨現金流']:,.0f}")
-            if summary['XIRR%']:
-                k4.metric("總體 XIRR", f"{summary['XIRR%']:.2f}%")
-            else:
-                k4.metric("庫存市值", f"${summary['期末庫存市值']:,.0f}")
+            k4.metric("年化報酬 (XIRR)", f"{summary['XIRR%']:.2f}%" if summary['XIRR%'] else "N/A")
 
         st.divider()
 
-        # --- 2. 策略專屬圖表 (Visualizations) ---
-        
-        # A. 總覽圖：資產堆疊圖 (Stacked Area) - FIX APPLIED HERE
-        if strategy_filter is None:
-            st.markdown("##### 🏔️ 資產累積趨勢 (本金 vs 獲利 vs 股息)")
-            
+        # 圖表區域
+        if strategy_filter is None: # 總覽模式
+            st.markdown("##### 🏔️ 資產累積趨勢")
             chart_data = []
-            cum_cost = 0
-            cum_div = 0
-            cum_realized = 0
-            
+            cum_cost = 0; cum_div = 0; cum_realized = 0
             sorted_df = period_df.sort_values('Date')
             for _, r in sorted_df.iterrows():
-                act = r['Action']
-                amt = r['Total_Amount']
-                if act == 'Buy':
-                    cum_cost += amt
-                elif act == 'Sell':
-                    # 簡易估算: 假設賣出回本8成本金, 2成獲利
-                    cum_cost -= (amt * 0.8) 
+                act = r['Action']; amt = r['Total_Amount']
+                if act == '買入': cum_cost += amt
+                elif act == '賣出': 
+                    cum_cost -= (amt * 0.8) # 估算
                     cum_realized += (amt * 0.2)
-                elif act == 'Dividend':
-                    cum_div += amt
-                
-                chart_data.append({
-                    'Date': r['Date'],
-                    'Net Invested': cum_cost,
-                    'Dividend': cum_div,
-                    'Realized Gain': cum_realized
-                })
+                elif act == '領息': cum_div += amt
+                chart_data.append({'日期': r['Date'], '淨投入本金': cum_cost, '累積股息': cum_div, '已實現獲利': cum_realized})
             
             if chart_data:
-                chart_df = pd.DataFrame(chart_data)
-                # [Fix] 使用 Pandas melt 來準備資料，解決 Altair transform_fold 報錯問題
-                chart_df_long = chart_df.melt('Date', var_name='Category', value_name='Amount')
-                
-                chart = alt.Chart(chart_df_long).mark_area().encode(
-                    x=alt.X('Date:T', title='日期'),
-                    y=alt.Y('Amount:Q', title='金額'),
-                    color=alt.Color('Category:N', title='類別', scale=alt.Scale(scheme='category10')),
-                    tooltip=['Date', 'Category', 'Amount']
+                chart_df = pd.DataFrame(chart_data).melt('日期', var_name='類別', value_name='金額')
+                chart = alt.Chart(chart_df).mark_area().encode(
+                    x='日期:T', y='金額:Q', color=alt.Color('類別:N', scale=alt.Scale(scheme='category10')), tooltip=['日期', '類別', '金額']
                 ).properties(height=300)
                 st.altair_chart(chart, use_container_width=True)
 
-        # B. 存股圖：股息成長 (Bar Chart)
-        elif strategy_filter == "Dividend":
+        elif strategy_filter == "存股":
             st.markdown("##### 💰 歷年股息成長")
             if not years_df.empty:
                 bar_data = years_df[['年度', '領息']].copy()
                 bar_data['領息'] = bar_data['領息'].str.replace('$','').str.replace(',','').astype(float)
-                
-                chart = alt.Chart(bar_data).mark_bar(color='#ff7f0e').encode(
-                    x='年度:O',
-                    y='領息:Q',
-                    tooltip=['年度', '領息']
-                ).properties(height=300)
+                chart = alt.Chart(bar_data).mark_bar(color='#ff7f0e').encode(x='年度:O', y='領息:Q', tooltip=['年度', '領息']).properties(height=300)
                 st.altair_chart(chart, use_container_width=True)
 
-        # C. 波段圖：權益曲線 + 散佈圖
-        elif "Swing" in strategy_filter:
+        elif "波段" in strategy_filter:
             st.markdown("##### 📈 交易損益曲線 & 落點")
             if not trade_log_df.empty:
                 swing_trades = trade_log_df[trade_log_df['Strategy'].str.contains(strategy_filter, na=False)]
                 if not swing_trades.empty:
                     swing_trades = swing_trades.sort_values('Date')
-                    swing_trades['Cumulative PnL'] = swing_trades['PnL'].cumsum()
-                    
-                    line = alt.Chart(swing_trades).mark_line(color='purple').encode(
-                        x='Date:T',
-                        y='Cumulative PnL:Q',
-                        tooltip=['Date', 'Cumulative PnL']
-                    )
-                    
+                    swing_trades['累積損益'] = swing_trades['PnL'].cumsum()
+                    line = alt.Chart(swing_trades).mark_line(color='purple').encode(x='Date:T', y='累積損益:Q', tooltip=['Date', '累積損益'])
                     points = alt.Chart(swing_trades).mark_circle(size=60).encode(
-                        x='Date:T',
-                        y='PnL:Q',
-                        color=alt.condition(alt.datum.PnL > 0, alt.value("green"), alt.value("red")),
-                        tooltip=['Date', 'Ticker', 'PnL']
+                        x='Date:T', y='PnL:Q', color=alt.condition(alt.datum.PnL > 0, alt.value("green"), alt.value("red")), tooltip=['Date', 'Ticker', 'PnL']
                     )
-                    
                     st.altair_chart((line + points).interactive(), use_container_width=True)
 
-        # --- 3. 年度比較表 ---
         if not years_df.empty:
             st.markdown("##### 📅 年度績效表")
             st.dataframe(years_df, use_container_width=True, hide_index=True)
@@ -505,215 +491,204 @@ def render_dashboard_tab(df, start_date, end_date, selected_tickers, strategy_fi
         st.info("此區間或策略下無交易資料")
 
 # ==========================================
-# 5. 主程式 (請確認您的 app.py 後半段是這樣)
+# 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v4.1")
+st.title("📊 投資戰情室 v5.0")
 
 df, df_funds, usd_rate = load_data()
-all_tickers = df['Ticker'].unique().tolist() if not df.empty else []
+if df.empty:
+    st.warning("目前無任何交易紀錄")
+    st.stop()
 
-# --- 指揮中心 ---
-with st.expander("🛠️ 指揮中心 (篩選 / 新增 / 更新)", expanded=True):
-    cmd_tab1, cmd_tab2, cmd_tab3 = st.tabs(["📊 全域篩選", "➕ 新增交易", "💵 基金淨值"])
+all_tickers = df['Ticker'].unique().tolist()
+full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
+
+# --- 1. 最上方：全域總覽區 (Always Top) ---
+st.markdown("### 🌍 全資產總覽 (All Time)")
+# 計算從最早一筆交易至今的績效
+total_summary, _, _ = analyze_period_advanced(df, df['Date'].min(), date.today(), None, full_portfolio_df, trade_log_df, None)
+if total_summary:
+    # 總覽卡片
+    o1, o2, o3, o4 = st.columns(4)
+    o1.metric("總庫存市值", f"${total_summary['期末庫存市值']:,.0f}")
+    o2.metric("歷史總獲利 (含息+價差)", f"${total_summary['總資產成長']:,.0f}")
+    o3.metric("總年化報酬 (XIRR)", f"{total_summary['XIRR%']:.2f}%" if total_summary['XIRR%'] else "N/A")
+    o4.metric("總現金流 (已領股息)", f"${total_summary['總領股息']:,.0f}")
     
-    with cmd_tab1:
-        c_s1, c_s2, c_s3 = st.columns([1, 1, 2])
-        with c_s1:
-            analysis_start = st.date_input("開始日期", value=date(datetime.now().year, 1, 1))
-        with c_s2:
-            analysis_end = st.date_input("結束日期", value=datetime.now().date())
-        with c_s3:
-            selected_tickers_dashboard = st.multiselect("篩選代號", all_tickers)
-
-    with cmd_tab2:
-        with st.form("top_entry_form", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                date_in = st.date_input("日期", key="top_date")
-                ticker = st.text_input("代號", key="top_ticker").upper()
-                typ_display = st.selectbox("種類", ["股票 (Stock)", "基金 (Fund)"], key="top_type")
-            with col2:
-                strategy_opts = ["存股 (Dividend)", "波段-短期 (Swing Short)", "波段-長期 (Swing Long)"]
-                strategy_display = st.multiselect("策略", strategy_opts, default=["存股 (Dividend)"], key="top_strat")
-                action_display = st.selectbox("動作", ["買入 (Buy)", "賣出 (Sell)", "領息 (Dividend)", "分割/減資 (Split)"], key="top_act")
-
-            col3, col4, col5 = st.columns(3)
-            with col3:
-                price = st.number_input("單價", min_value=0.0, format="%.2f", key="top_price")
-                shares = st.number_input("股數", min_value=-100000.0, step=100.0, format="%.2f", key="top_shares")
-            with col4:
-                fee = st.number_input("手續費 (0自動算)", min_value=0, key="top_fee")
-                total_amt = st.number_input("總金額 (0自動算)", min_value=0.0, format="%.2f", key="top_total")
-            with col5:
-                note = st.text_input("備註", key="top_note")
-                st.write("")
-                submitted = st.form_submit_button("送出交易", use_container_width=True)
-            
-            if submitted:
-                if not ticker:
-                    st.error("請輸入代號")
-                else:
-                    success = handle_transaction_submit(date_in, ticker, typ_display, strategy_display, action_display, price, shares, fee, total_amt, note)
-                    if success:
-                        st.success(f"已儲存 {ticker}！")
-                        st.cache_data.clear()
-
-    with cmd_tab3:
-        with st.form("top_fund_form", clear_on_submit=True):
-            c1, c2, c3 = st.columns([1, 1, 1])
-            with c1:
-                f_ticker = st.text_input("基金代號", key="top_fund_ticker").upper()
-            with c2:
-                f_net_val = st.number_input("最新淨值 (USD)", min_value=0.0, format="%.4f", key="top_fund_val")
-            with c3:
-                st.write("") 
-                f_submitted = st.form_submit_button("更新淨值", use_container_width=True)
-            
-            if f_submitted:
-                try:
-                    cell = ws_funds.find(f_ticker)
-                    ws_funds.update_cell(cell.row, 2, f_net_val)
-                    ws_funds.update_cell(cell.row, 3, str(datetime.now().date()))
-                except:
-                    ws_funds.append_row([f_ticker, f_net_val, str(datetime.now().date())])
-                st.success(f"{f_ticker} 更新成功！")
-                st.cache_data.clear()
-
-# --- 主要報告區 ---
-if not df.empty:
-    full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
+    # 總覽圖表 (簡單堆疊圖)
+    chart_data = []
+    cum_cost = 0; cum_profit = 0
+    sorted_df = df.sort_values('Date')
+    for _, r in sorted_df.iterrows():
+        act = r['Action']; amt = r['Total_Amount']
+        if act == '買入': cum_cost += amt
+        elif act == '賣出': 
+            cum_cost -= (amt * 0.8)
+            cum_profit += (amt * 0.2)
+        elif act == '領息': cum_profit += amt
+        chart_data.append({'日期': r['Date'], '淨本金': cum_cost, '累積獲利': cum_profit})
     
-    tabs_labels = ["📊 投資總覽", "⚡ 波段-短期", "🐢 波段-長期", "💰 存股"]
-    if selected_tickers_dashboard:
-        for t in selected_tickers_dashboard:
-            tabs_labels.append(f"🔍 {t}")
-            
-    tabs = st.tabs(tabs_labels)
+    c_df = pd.DataFrame(chart_data).melt('日期', var_name='類別', value_name='金額')
+    chart = alt.Chart(c_df).mark_area().encode(
+        x='日期:T', y='金額:Q', color=alt.Color('類別:N', scale=alt.Scale(range=['#1f77b4', '#2ca02c'])), tooltip=['日期', '類別', '金額']
+    ).properties(height=250)
+    st.altair_chart(chart, use_container_width=True)
+
+st.divider()
+
+# --- 2. 左右分欄篩選與報表 ---
+col_filter, col_display = st.columns([1, 3])
+
+# [左欄] 篩選區
+with col_filter:
+    st.subheader("🔍 篩選條件")
     
-    with tabs[0]:
-        st.markdown("#### 🌍 全投資組合績效")
-        render_dashboard_tab(df, analysis_start, analysis_end, selected_tickers_dashboard, None, full_portfolio_df, trade_log_df)
-
-    with tabs[1]:
-        st.markdown("#### ⚡ 短線交易 | 核心指標：勝率、已實現損益")
-        render_dashboard_tab(df, analysis_start, analysis_end, selected_tickers_dashboard, "Swing Short", full_portfolio_df, trade_log_df)
-
-    with tabs[2]:
-        st.markdown("#### 🐢 長線波段 | 核心指標：XIRR、資產成長")
-        render_dashboard_tab(df, analysis_start, analysis_end, selected_tickers_dashboard, "Swing Long", full_portfolio_df, trade_log_df)
-
-    with tabs[3]:
-        st.markdown("#### 💰 存股領息 | 核心指標：YoC、現金流")
-        render_dashboard_tab(df, analysis_start, analysis_end, selected_tickers_dashboard, "Dividend", full_portfolio_df, trade_log_df)
-
-    if selected_tickers_dashboard:
-        for i, ticker in enumerate(selected_tickers_dashboard):
-            with tabs[4+i]:
-                st.markdown(f"#### 🔍 {ticker} 個股分析")
-                # === 關鍵修正：確保這裡的參數完整 ===
-                render_dashboard_tab(df, analysis_start, analysis_end, [ticker], None, full_portfolio_df, trade_log_df)
-                
-                st.divider()
-                t_hist, t_add = st.tabs(["📜 歷史紀錄", "⚡ 快速新增"])
-                with t_hist:
-                    ticker_history = df[df['Ticker'] == ticker].sort_values('Date', ascending=False)
-                    display_history = ticker_history[['Date', 'Action', 'Strategy', 'Price', 'Shares', 'Total_Amount', 'Note']].copy()
-                    display_history.columns = ['日期', '動作', '策略', '單價', '股數', '總金額', '備註']
-                    st.dataframe(display_history, use_container_width=True, hide_index=True)
-                with t_add:
-                    with st.form(f"dash_add_{ticker}", clear_on_submit=True):
-                        dc1, dc2, dc3, dc4 = st.columns(4)
-                        with dc1:
-                            d_date = st.date_input("日期", key=f"d_date_{ticker}")
-                            d_action = st.selectbox("動作", ["買入 (Buy)", "賣出 (Sell)", "領息 (Dividend)"], key=f"d_act_{ticker}")
-                        with dc2:
-                            strat_opts_dyn = ["存股 (Dividend)", "波段-短期 (Swing Short)", "波段-長期 (Swing Long)"]
-                            d_strat = st.multiselect("策略", strat_opts_dyn, default=["存股 (Dividend)"], key=f"d_st_{ticker}")
-                            d_price = st.number_input("單價", step=0.1, key=f"d_price_{ticker}")
-                        with dc3:
-                            d_shares = st.number_input("股數", step=100.0, key=f"d_share_{ticker}")
-                            d_fee = st.number_input("手續費 (0自動算)", min_value=0, key=f"d_fee_{ticker}")
-                        with dc4:
-                            d_total = st.number_input("總金額 (0自動算)", step=1000.0, key=f"d_tot_{ticker}")
-                            d_note = st.text_input("備註", key=f"d_note_{ticker}")
-                            st.write("")
-                            d_submit = st.form_submit_button("新增")
-                        
-                        if d_submit:
-                            success = handle_transaction_submit(d_date, ticker, "股票 (Stock)", d_strat, d_action, d_price, d_shares, d_fee, d_total, d_note)
-                            if success:
-                                st.success("已新增！請重新整理。")
-                                st.cache_data.clear()
-
-# --- 庫存總覽 ---
-st.markdown("### 📦 現有庫存總覽")
-if not df.empty and not full_portfolio_df.empty:
+    # 時間篩選 (預設全區間)
+    min_date = df['Date'].min()
+    max_date = date.today()
+    analysis_start = st.date_input("開始日期", value=min_date, min_value=min_date, max_value=max_date)
+    analysis_end = st.date_input("結束日期", value=max_date, min_value=min_date, max_value=max_date)
     
-    # 庫存策略圓餅圖
-    if not full_portfolio_df.empty:
-        pie_data = full_portfolio_df.groupby('策略')['總成本'].sum().reset_index()
-        pie_chart = alt.Chart(pie_data).mark_arc(innerRadius=50).encode(
-            theta=alt.Theta(field="總成本", type="quantitative"),
-            color=alt.Color(field="策略", type="nominal"),
-            tooltip=['策略', '總成本']
-        ).properties(title="策略資金配置 (依成本)")
+    # 標的篩選
+    selected_tickers = st.multiselect("投資標的 (可複選)", all_tickers, default=None)
+    
+    st.caption("💡 若未選擇標的，則顯示所有資料。")
+
+# [右欄] 智慧呈現區
+with col_display:
+    # 決定要顯示哪些分頁
+    # 邏輯：
+    # 1. 如果沒選標的 -> 顯示預設的三大策略分頁
+    # 2. 如果有選標的 -> 找出這些標的涉及的所有策略，動態產生分頁
+    
+    tabs_to_show = []
+    
+    if not selected_tickers:
+        # 預設顯示三大策略
+        tabs_to_show = [("波段-短期", "波段-短期"), ("波段-長期", "波段-長期"), ("存股", "存股")]
+    else:
+        # 針對選定的股票，找出它們有使用過哪些策略
+        filtered_stocks = df[df['Ticker'].isin(selected_tickers)]
         
-        c_pie1, c_pie2 = st.columns([1, 2])
-        with c_pie1:
-             st.altair_chart(pie_chart, use_container_width=True)
-        with c_pie2:
-            total_mv = full_portfolio_df['市值'].sum()
-            total_cost = full_portfolio_df['總成本'].sum()
-            total_pl = full_portfolio_df['帳面損益'].sum()
-            st.info(f"📊 **合計 (全持股)**｜ 市值: **${total_mv:,.0f}** ｜ 成本: **${total_cost:,.0f}** ｜ 損益: **${total_pl:,.0f}**")
-            
-            cols_show = ["代號", "庫存", "平均成本", "市價", "市值", "帳面損益", "含息總報%", "策略"]
-            event = st.dataframe(
-                full_portfolio_df[cols_show],
-                use_container_width=True,
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="inventory_table"
+        # 檢查是否含有各種策略
+        has_swing_short = filtered_stocks['Strategy'].str.contains("波段-短期").any()
+        has_swing_long = filtered_stocks['Strategy'].str.contains("波段-長期").any()
+        has_dividend = filtered_stocks['Strategy'].str.contains("存股").any()
+        
+        if has_swing_short: tabs_to_show.append(("波段-短期", "波段-短期"))
+        if has_swing_long: tabs_to_show.append(("波段-長期", "波段-長期"))
+        if has_dividend: tabs_to_show.append(("存股", "存股"))
+        
+        # 如果該股票沒有被明確分類，或是新股票，至少顯示一個總覽
+        if not tabs_to_show:
+            tabs_to_show.append(("綜合檢視", None))
+
+    # 建立分頁
+    tab_objs = st.tabs([t[0] for t in tabs_to_show])
+    
+    for i, (tab_name, strat_filter) in enumerate(tabs_to_show):
+        with tab_objs[i]:
+            st.markdown(f"#### 📊 分析報告：{tab_name}")
+            render_dashboard_tab(
+                df, analysis_start, analysis_end, 
+                selected_tickers, # 傳入篩選的股票
+                strat_filter, # 傳入策略
+                full_portfolio_df, trade_log_df
             )
+
+st.divider()
+
+# --- 3. 庫存與新增交易區 (移到底部) ---
+st.markdown("### 📦 庫存管理與交易登錄")
+
+# 準備庫存表格資料
+if not full_portfolio_df.empty:
+    cols_show = ["代號", "庫存", "平均成本", "市價", "市值", "帳面損益", "含息總報%", "策略"]
+    event = st.dataframe(
+        full_portfolio_df[cols_show],
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="inventory_table"
+    )
+    
+    # 智慧新增邏輯
+    default_ticker = ""
+    default_strat = ["存股"] # 預設
     
     if len(event.selection.rows) > 0:
         selected_index = event.selection.rows[0]
         selected_row = full_portfolio_df.iloc[selected_index]
-        target_ticker = selected_row['代號']
-        st.divider()
-        st.markdown(f"### 📂 {target_ticker} 交易詳情")
-        t1, t2 = st.tabs(["📜 歷史紀錄", "⚡ 快速新增"])
-        with t1:
-            target_df = df[df['Ticker'] == target_ticker].sort_values('Date', ascending=False)
-            if not target_df.empty:
-                view_df = target_df[['Date', 'Action', 'Strategy', 'Price', 'Shares', 'Fee', 'Total_Amount', 'Note']].copy()
-                view_df.columns = ['日期', '動作', '策略', '單價', '股數', '手續費', '總金額', '備註']
-                st.dataframe(view_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("無交易紀錄")
-        with t2:
-            with st.form(f"quick_add_inline_{target_ticker}", clear_on_submit=True):
+        default_ticker = selected_row['代號']
+        # 自動抓取該股票最近一次的策略
+        last_strat_str = df[df['Ticker'] == default_ticker].iloc[-1]['Strategy']
+        # 簡單處理：若有多個策略，嘗試分割，這裡先取第一個符合的
+        possible_strats = ["存股", "波段-短期", "波段-長期"]
+        for s in possible_strats:
+            if s in last_strat_str:
+                default_strat = [s]
+                break
+
+    # 新增交易 / 更新淨值 (Expanders)
+    col_input1, col_input2 = st.columns([2, 1])
+    
+    with col_input1:
+        with st.expander("➕ 新增交易紀錄", expanded=True if default_ticker else False):
+            with st.form("bottom_entry_form", clear_on_submit=True):
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
-                    q_date = st.date_input("日期")
-                    q_action = st.selectbox("動作", ["買入 (Buy)", "賣出 (Sell)", "領息 (Dividend)"])
+                    d_date = st.date_input("日期")
+                    # 智慧預填代號
+                    d_ticker = st.text_input("代號", value=default_ticker).upper()
                 with c2:
-                    strat_opts_inv = ["存股 (Dividend)", "波段-短期 (Swing Short)", "波段-長期 (Swing Long)"]
-                    q_strat = st.multiselect("策略", strat_opts_inv, default=["存股 (Dividend)"])
-                    q_price = st.number_input("單價", step=0.1)
+                    d_type = st.selectbox("種類", ["股票", "基金"])
+                    d_action = st.selectbox("動作", ["買入", "賣出", "領息", "分割"])
                 with c3:
-                    q_shares = st.number_input("股數", step=100.0)
-                    q_fee = st.number_input("手續費 (0自動算)", min_value=0)
+                    # 智慧預填策略
+                    d_strat = st.multiselect("策略", ["存股", "波段-短期", "波段-長期"], default=default_strat)
+                    d_price = st.number_input("單價", min_value=0.0, format="%.2f")
                 with c4:
-                    q_total = st.number_input("總金額 (0自動算)", step=1000.0)
-                    q_note = st.text_input("備註")
+                    d_shares = st.number_input("股數", step=100.0)
+                    d_fee = st.number_input("手續費 (0自動算)", min_value=0)
+                
+                c5, c6 = st.columns([3, 1])
+                with c5:
+                    d_total = st.number_input("總金額 (0自動算)", step=1000.0)
+                    d_note = st.text_input("備註")
+                with c6:
                     st.write("")
-                    q_submit = st.form_submit_button(f"新增 {target_ticker}")
-                if q_submit:
-                    success = handle_transaction_submit(q_date, target_ticker, "股票 (Stock)", q_strat, q_action, q_price, q_shares, q_fee, q_total, q_note)
-                    if success:
-                        st.success("已新增！請重新整理頁面。")
-                        st.cache_data.clear()
+                    st.write("")
+                    submitted = st.form_submit_button("送出交易", use_container_width=True)
+                
+                if submitted:
+                    if not d_ticker:
+                        st.error("請輸入代號")
+                    else:
+                        success = handle_transaction_submit(
+                            d_date, d_ticker, d_type, d_strat, d_action, 
+                            d_price, d_shares, d_fee, d_total, d_note
+                        )
+                        if success:
+                            st.success(f"已儲存 {d_ticker}！")
+                            st.cache_data.clear()
+
+    with col_input2:
+        with st.expander("💵 更新基金淨值"):
+            with st.form("bottom_fund_form", clear_on_submit=True):
+                f_ticker = st.text_input("基金代號").upper()
+                f_net_val = st.number_input("最新淨值 (USD)", min_value=0.0, format="%.4f")
+                f_btn = st.form_submit_button("更新", use_container_width=True)
+                
+                if f_btn:
+                    try:
+                        cell = ws_funds.find(f_ticker)
+                        ws_funds.update_cell(cell.row, 2, f_net_val)
+                        ws_funds.update_cell(cell.row, 3, str(datetime.now().date()))
+                    except:
+                        ws_funds.append_row([f_ticker, f_net_val, str(datetime.now().date())])
+                    st.success("更新成功")
+                    st.cache_data.clear()
+
 else:
-    st.info("尚無庫存或交易資料。")
+    st.info("尚無資料，請先新增第一筆交易。")
