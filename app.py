@@ -1,5 +1,5 @@
-# Version: v6.2 (Focused Yearly Tables, Recent Dividend Chart, Stock/Fund Split Inventory)
-# CTOSignature: Custom Yearly Columns, Date Domain Limit, Inventory Categorization
+# Version: v6.3 (Fix Yearly ROI Formula using Historical Cost Basis)
+# CTOSignature: Implemented User's ROI Formula: (Realized + Div) / (Start_Cost + Buy)
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -13,7 +13,7 @@ import altair as alt
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v6.2", layout="wide")
+st.set_page_config(page_title="投資戰情室 v6.3", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -191,6 +191,36 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
             })
     return pd.DataFrame(results), pd.DataFrame(trade_log)
 
+# [v6.3 New Helper Function] 計算特定日期的歷史庫存成本
+def get_historical_cost_basis(df, cutoff_date, selected_tickers=None, strategy_filter=None):
+    """回推在 cutoff_date 之前的庫存總成本 (Start Value)"""
+    hist_df = df[df['Date'] < cutoff_date].sort_values('Date')
+    
+    if selected_tickers: hist_df = hist_df[hist_df['Ticker'].isin(selected_tickers)]
+    if strategy_filter: hist_df = hist_df[hist_df['Strategy'].str.contains(strategy_filter, na=False)]
+    
+    portfolio_temp = {}
+    for _, row in hist_df.iterrows():
+        ticker = row['Ticker']; action = row['Action']
+        qty = row['Shares']; amount = row['Total_Amount']
+        
+        if ticker not in portfolio_temp: portfolio_temp[ticker] = {'shares': 0, 'total_cost': 0}
+        p = portfolio_temp[ticker]
+        
+        if action == '買入':
+            p['shares'] += qty; p['total_cost'] += amount
+        elif action == '賣出':
+            if p['shares'] > 0:
+                pct_sold = qty / p['shares']
+                cost_of_sold = p['total_cost'] * pct_sold
+                p['shares'] -= qty; p['total_cost'] -= cost_of_sold
+        elif action == '分割':
+            p['shares'] += qty
+            if p['shares'] <= 0.001: p['shares'] = 0; p['total_cost'] = 0
+            
+    total_basis = sum([d['total_cost'] for d in portfolio_temp.values() if d['shares'] > 0.001])
+    return total_basis
+
 def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_portfolio_df, trade_log_df, strategy_filter=None):
     mask = (df['Date'] >= start_date) & (df['Date'] <= end_date)
     if selected_tickers: mask = mask & (df['Ticker'].isin(selected_tickers))
@@ -253,6 +283,8 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     start_y = start_date.year; end_y = end_date.year
     for y in range(start_y, end_y + 1):
         y_df = period_df[pd.to_datetime(period_df['Date']).dt.year == y]
+        
+        # 準備年度資料
         y_trades = pd.DataFrame()
         if not trade_log_df.empty:
             y_trades = trade_log_df[(pd.to_datetime(trade_log_df['Date']).dt.year == y)]
@@ -276,9 +308,20 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
             y_xirr = xirr(y_cash_flows)
             y_xirr_str = f"{y_xirr*100:.2f}%" if y_xirr else "N/A"
 
+            # [v6.3 Fix] 年度 ROI 公式修正
+            # 公式: (已實現 + 股息) / (年初庫存成本 + 本期買入)
+            y_start_date = date(y, 1, 1)
+            y_start_cost_basis = get_historical_cost_basis(df, y_start_date, selected_tickers, strategy_filter)
+            
+            y_roi_denominator = y_start_cost_basis + y_buy
             y_roi = "N/A"
-            if y_buy > 0: y_roi = f"{((y_realized + y_div) / y_buy) * 100:.2f}%"
-            y_yoc = f"{(y_div/y_buy)*100:.2f}%" if y_buy > 0 else "N/A"
+            if y_roi_denominator > 0:
+                # 分子 = 已實現 + 股息 (等同於: 年末庫存 + 賣出 + 股息 - 年初庫存 - 買入)
+                y_roi_val = ((y_realized + y_div) / y_roi_denominator) * 100
+                y_roi = f"{y_roi_val:.2f}%"
+
+            y_yoc = "N/A" # YoC 需即時庫存配合，歷史較難回推精準，維持原邏輯
+            if y_buy > 0: y_yoc = f"{(y_div/y_buy)*100:.2f}%"
 
             row_data = {
                 "年度": str(y),
@@ -411,7 +454,6 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
         if not years_df.empty:
             st.markdown("##### 📅 年度績效表")
             cols_to_show = []
-            # [Feature] 根據策略鎖定欄位
             if mode_name == "swing":
                 cols_to_show = ["年度", "已實現", "交易勝率", "年度投資報酬率"]
             elif mode_name == "dividend":
@@ -425,7 +467,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v6.2")
+st.title("📊 投資戰情室 v6.3")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -489,11 +531,9 @@ st.divider()
 st.markdown("### 📦 庫存管理與交易登錄")
 
 if not full_portfolio_df.empty:
-    # [Feature] 股/基分離顯示
     stocks_pf = full_portfolio_df[full_portfolio_df['種類'] == '股票']
     funds_pf = full_portfolio_df[full_portfolio_df['種類'] == '基金']
     
-    # 股票卡片
     if not stocks_pf.empty:
         st.markdown("#### 📈 股票庫存")
         s1, s2, s3 = st.columns(3)
@@ -501,14 +541,12 @@ if not full_portfolio_df.empty:
         s2.metric("股票總成本", f"${stocks_pf['總成本'].sum():,.0f}")
         s3.metric("股票帳面損益", f"${stocks_pf['帳面損益'].sum():,.0f}", delta_color="normal")
     
-    # 基金卡片 (我為您規劃的指標)
     if not funds_pf.empty:
         st.markdown("#### 🛡️ 基金庫存")
         f1, f2, f3, f4 = st.columns(4)
         f_cost = funds_pf['總成本'].sum()
         f_pl = funds_pf['帳面損益'].sum()
         f_roi = (f_pl / f_cost * 100) if f_cost > 0 else 0
-        
         f1.metric("基金總現值", f"${funds_pf['庫存現值'].sum():,.0f}")
         f2.metric("基金總投入", f"${f_cost:,.0f}")
         f3.metric("基金帳面損益", f"${f_pl:,.0f}", delta_color="normal")
