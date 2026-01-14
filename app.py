@@ -1,11 +1,11 @@
-# Version: v6.1 (Metrics Reorder, Split Realized/Unrealized, Monthly Dividend Stack Chart)
-# CTOSignature: Specific Metrics Layout, Custom Yearly Tables, Monthly Viz
+# Version: v6.2 (Focused Yearly Tables, Recent Dividend Chart, Stock/Fund Split Inventory)
+# CTOSignature: Custom Yearly Columns, Date Domain Limit, Inventory Categorization
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import numpy as np
 from scipy import optimize
 import altair as alt
@@ -13,7 +13,7 @@ import altair as alt
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v6.1", layout="wide")
+st.set_page_config(page_title="投資戰情室 v6.2", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -184,7 +184,7 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
             fill_status = "✅已填" if current_price >= avg_cost else "🔻貼息"
             
             results.append({
-                "代號": ticker, "策略": data['strategy'], "庫存": data['shares'], "平均成本": round(avg_cost, 2),
+                "代號": ticker, "種類": data['type'], "策略": data['strategy'], "庫存": data['shares'], "平均成本": round(avg_cost, 2),
                 "市價": round(current_price, 2), "庫存現值": round(market_value, 0), "帳面損益": round(unrealized_pl, 0),
                 "成本殖利率%": round(yield_on_cost, 2), "含息總報%": round(roi_total, 2), "已領股息": round(data['dividend_collected'], 0),
                 "填息": fill_status, "總成本": round(data['total_cost'], 0)
@@ -213,15 +213,9 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
         ending_inventory_value = target_inv['庫存現值'].sum()
         total_cost_basis = target_inv['總成本'].sum()
 
-    # 指標運算
-    # 1. 未實現損益 (庫存部分)
     total_unrealized = ending_inventory_value - total_cost_basis
+    realized_pnl_period = 0; win_rate = 0
     
-    # 2. 已實現損益 (賣出部分)
-    realized_pnl_period = 0
-    win_rate = 0
-    
-    # 篩選區間內的交易紀錄
     if not trade_log_df.empty:
         t_mask = (trade_log_df['Date'] >= start_date) & (trade_log_df['Date'] <= end_date)
         if selected_tickers: t_mask = t_mask & (trade_log_df['Ticker'].isin(selected_tickers))
@@ -233,10 +227,8 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
             wins = period_trades[period_trades['PnL'] > 0]
             if len(period_trades) > 0: win_rate = (len(wins) / len(period_trades)) * 100
 
-    # 3. 累積總損益 = 已實現 + 未實現 + 股息
     total_profit = realized_pnl_period + total_unrealized + total_dividend
 
-    # XIRR
     cash_flows = []
     for _, row in period_df.iterrows():
         d = row['Date']; amt = row['Total_Amount']; act = row['Action']
@@ -257,12 +249,10 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
         "YoC%": yoc_period, "回本率%": payback_progress, "庫存現值": ending_inventory_value
     }
 
-    # 年度資料 (依策略不同準備欄位)
     years_data = []
     start_y = start_date.year; end_y = end_date.year
     for y in range(start_y, end_y + 1):
         y_df = period_df[pd.to_datetime(period_df['Date']).dt.year == y]
-        # 該年度的 Trade Log
         y_trades = pd.DataFrame()
         if not trade_log_df.empty:
             y_trades = trade_log_df[(pd.to_datetime(trade_log_df['Date']).dt.year == y)]
@@ -272,14 +262,12 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
         if not y_df.empty or not y_trades.empty:
             y_div = y_df[y_df['Action'] == '領息']['Total_Amount'].sum()
             y_buy = y_df[y_df['Action'] == '買入']['Total_Amount'].sum()
-            
             y_realized = 0; y_win = 0
             if not y_trades.empty:
                 y_realized = y_trades['PnL'].sum()
                 wins = y_trades[y_trades['PnL'] > 0]
                 if len(y_trades) > 0: y_win = (len(wins) / len(y_trades)) * 100
             
-            # 簡易年度 XIRR (僅供參考)
             y_cash_flows = []
             for _, r in y_df.iterrows():
                 d = r['Date']; amt = r['Total_Amount']; act = r['Action']
@@ -288,16 +276,9 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
             y_xirr = xirr(y_cash_flows)
             y_xirr_str = f"{y_xirr*100:.2f}%" if y_xirr else "N/A"
 
-            # 簡易年度 ROI (現金流基礎: (賣+領 - 買)/買) 或 (已實現+領)/投入
-            # 這裡採用 (已實現 + 領息) / 當年度投入 (若無投入則N/A) 以符合常見績效表
             y_roi = "N/A"
-            if y_buy > 0:
-                roi_val = ((y_realized + y_div) / y_buy) * 100
-                y_roi = f"{roi_val:.2f}%"
-
-            # YoC (年度)
-            y_yoc = "N/A" # 這裡難以追溯當年度成本，暫以當年度領息/當年度投入參考
-            if y_buy > 0: y_yoc = f"{(y_div/y_buy)*100:.2f}%"
+            if y_buy > 0: y_roi = f"{((y_realized + y_div) / y_buy) * 100:.2f}%"
+            y_yoc = f"{(y_div/y_buy)*100:.2f}%" if y_buy > 0 else "N/A"
 
             row_data = {
                 "年度": str(y),
@@ -343,34 +324,30 @@ def handle_transaction_submit(date_in, ticker, type_display, strategy_list, acti
 # 4. 儀表板與圖表
 # ==========================================
 def render_metrics_cards(summary, mode):
-    # 排版與指標順序調整
-    if mode == "swing": # 波段
+    if mode == "swing": 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("累積總損益", f"${summary['累積總損益']:,.0f}")
         k2.metric("已領股息", f"${summary['已領股息']:,.0f}")
         k3.metric("已實現", f"${summary['已實現損益']:,.0f}")
         k4.metric("未實現", f"${summary['未實現損益']:,.0f}")
-        
         k5, k6, k7, k8 = st.columns(4)
         k5.metric("年化報酬率", f"{summary['XIRR%']:.2f}%" if summary['XIRR%'] else "N/A")
         k6.metric("交易勝率", f"{summary['勝率%']:.1f}%")
         k7.empty(); k8.empty()
         
-    elif mode == "dividend": # 存股
+    elif mode == "dividend":
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("累積總損益", f"${summary['累積總損益']:,.0f}")
         k2.metric("已領股息", f"${summary['已領股息']:,.0f}")
         k3.metric("已實現", f"${summary['已實現損益']:,.0f}")
         k4.metric("未實現", f"${summary['未實現損益']:,.0f}")
-
         k5, k6, k7, k8 = st.columns(4)
         k5.metric("年化報酬率", f"{summary['XIRR%']:.2f}%" if summary['XIRR%'] else "N/A")
         k6.metric("成本殖利率 (YoC)", f"{summary['YoC%']:.2f}%")
         k7.metric("回本率", f"{summary['回本率%']:.1f}%")
         k8.empty()
         
-    else: # general 全資產
-        # 全資產第一行
+    else: # general
         g1, g2, g3, g4, g5 = st.columns(5)
         g1.metric("累積總損益", f"${summary['累積總損益']:,.0f}")
         g2.metric("已領股息", f"${summary['已領股息']:,.0f}")
@@ -397,19 +374,21 @@ def render_chart_swing(trade_log_df, strategy_filter=None):
             st.info("尚無交易紀錄")
 
 def render_chart_dividend_monthly(period_df):
-    # 篩選領息紀錄
     div_df = period_df[period_df['Action'] == '領息'].copy()
     if not div_df.empty:
-        # 轉換日期為月份 (YYYY-MM)
-        div_df['Month'] = pd.to_datetime(div_df['Date']).dt.strftime('%Y-%m')
+        div_df['Date'] = pd.to_datetime(div_df['Date'])
+        div_df['Month'] = div_df['Date'].dt.strftime('%Y-%m')
         
-        # 製作堆疊柱狀圖 (X=月份, Y=金額, Color=標的)
+        # 設定預設顯示區間：最近 24 個月
+        max_date = div_df['Date'].max()
+        min_view_date = max_date - pd.DateOffset(months=24)
+        
         chart = alt.Chart(div_df).mark_bar().encode(
-            x=alt.X('Month:O', title='月份'),
+            x=alt.X('Month:O', title='月份', scale=alt.Scale(domain=sorted(div_df[div_df['Date'] >= min_view_date]['Month'].unique()))),
             y=alt.Y('Total_Amount:Q', title='股息金額'),
             color=alt.Color('Ticker:N', title='投資標的'),
             tooltip=['Month', 'Ticker', 'Total_Amount']
-        ).properties(height=350).interactive()
+        ).properties(height=350).interactive(bind_x=True) # 啟用 X 軸互動 (平移)
         
         st.altair_chart(chart, use_container_width=True)
     else:
@@ -431,14 +410,13 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
         
         if not years_df.empty:
             st.markdown("##### 📅 年度績效表")
-            # 依策略篩選欄位
             cols_to_show = []
+            # [Feature] 根據策略鎖定欄位
             if mode_name == "swing":
-                cols_to_show = ["年度", "已領股息", "已實現", "年度投資報酬率", "年化報酬率", "交易勝率"]
+                cols_to_show = ["年度", "已實現", "交易勝率", "年度投資報酬率"]
             elif mode_name == "dividend":
-                cols_to_show = ["年度", "已領股息", "已實現", "年度投資報酬率", "年化報酬率", "成本殖利率 (YoC)", "回本率"]
+                cols_to_show = ["年度", "已領股息", "成本殖利率 (YoC)", "回本率"]
             
-            # 過濾掉不存在的欄位 (防呆)
             final_cols = [c for c in cols_to_show if c in years_df.columns]
             st.dataframe(years_df[final_cols], use_container_width=True, hide_index=True)
     else:
@@ -447,7 +425,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v6.1")
+st.title("📊 投資戰情室 v6.2")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -461,9 +439,7 @@ full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
 st.markdown("### 🌍 全資產總覽 (All Time)")
 total_summary, _, _ = analyze_period_advanced(df, df['Date'].min(), date.today(), None, full_portfolio_df, trade_log_df, None)
 if total_summary:
-    # 按照需求 1.1 的順序
     render_metrics_cards(total_summary, "general")
-    # 按照需求 1.2 刪除下方圖表
 
 st.divider()
 
@@ -513,17 +489,34 @@ st.divider()
 st.markdown("### 📦 庫存管理與交易登錄")
 
 if not full_portfolio_df.empty:
-    total_mv = full_portfolio_df['庫存現值'].sum()
-    total_cost = full_portfolio_df['總成本'].sum()
-    total_unrealized = full_portfolio_df['帳面損益'].sum()
+    # [Feature] 股/基分離顯示
+    stocks_pf = full_portfolio_df[full_portfolio_df['種類'] == '股票']
+    funds_pf = full_portfolio_df[full_portfolio_df['種類'] == '基金']
     
-    i1, i2, i3 = st.columns(3)
-    i1.metric("庫存總現值", f"${total_mv:,.0f}")
-    i2.metric("庫存總成本", f"${total_cost:,.0f}")
-    i3.metric("庫存帳面損益", f"${total_unrealized:,.0f}", delta_color="normal")
+    # 股票卡片
+    if not stocks_pf.empty:
+        st.markdown("#### 📈 股票庫存")
+        s1, s2, s3 = st.columns(3)
+        s1.metric("股票總現值", f"${stocks_pf['庫存現值'].sum():,.0f}")
+        s2.metric("股票總成本", f"${stocks_pf['總成本'].sum():,.0f}")
+        s3.metric("股票帳面損益", f"${stocks_pf['帳面損益'].sum():,.0f}", delta_color="normal")
+    
+    # 基金卡片 (我為您規劃的指標)
+    if not funds_pf.empty:
+        st.markdown("#### 🛡️ 基金庫存")
+        f1, f2, f3, f4 = st.columns(4)
+        f_cost = funds_pf['總成本'].sum()
+        f_pl = funds_pf['帳面損益'].sum()
+        f_roi = (f_pl / f_cost * 100) if f_cost > 0 else 0
+        
+        f1.metric("基金總現值", f"${funds_pf['庫存現值'].sum():,.0f}")
+        f2.metric("基金總投入", f"${f_cost:,.0f}")
+        f3.metric("基金帳面損益", f"${f_pl:,.0f}", delta_color="normal")
+        f4.metric("基金總報酬率", f"{f_roi:.2f}%")
+
     st.write("") 
 
-    cols_show = ["代號", "庫存", "平均成本", "市價", "庫存現值", "帳面損益", "含息總報%", "策略"]
+    cols_show = ["代號", "種類", "庫存", "平均成本", "市價", "庫存現值", "帳面損益", "含息總報%", "策略"]
     event = st.dataframe(
         full_portfolio_df[cols_show], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="inventory_table"
     )
