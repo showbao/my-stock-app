@@ -1,5 +1,5 @@
-# Version: v6.3 (Fix Yearly ROI Formula using Historical Cost Basis)
-# CTOSignature: Implemented User's ROI Formula: (Realized + Div) / (Start_Cost + Buy)
+# Version: v6.4 (Asset Allocation Charts, Fix Dividend Scrolling, Keep v6.3 Logic)
+# CTOSignature: Added Donut Charts for Allocation, Switched Dividend X-Axis to Time for Scrolling
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -13,7 +13,7 @@ import altair as alt
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v6.3", layout="wide")
+st.set_page_config(page_title="投資戰情室 v6.4", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -37,7 +37,7 @@ ws_records = sh.worksheet("Records")
 ws_funds = sh.worksheet("Fund_Updates")
 
 # ==========================================
-# 2. 核心邏輯函數
+# 2. 核心邏輯函數 (維持 v6.3)
 # ==========================================
 
 @st.cache_data(ttl=3600) 
@@ -191,9 +191,7 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
             })
     return pd.DataFrame(results), pd.DataFrame(trade_log)
 
-# [v6.3 New Helper Function] 計算特定日期的歷史庫存成本
 def get_historical_cost_basis(df, cutoff_date, selected_tickers=None, strategy_filter=None):
-    """回推在 cutoff_date 之前的庫存總成本 (Start Value)"""
     hist_df = df[df['Date'] < cutoff_date].sort_values('Date')
     
     if selected_tickers: hist_df = hist_df[hist_df['Ticker'].isin(selected_tickers)]
@@ -283,8 +281,6 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     start_y = start_date.year; end_y = end_date.year
     for y in range(start_y, end_y + 1):
         y_df = period_df[pd.to_datetime(period_df['Date']).dt.year == y]
-        
-        # 準備年度資料
         y_trades = pd.DataFrame()
         if not trade_log_df.empty:
             y_trades = trade_log_df[(pd.to_datetime(trade_log_df['Date']).dt.year == y)]
@@ -308,19 +304,16 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
             y_xirr = xirr(y_cash_flows)
             y_xirr_str = f"{y_xirr*100:.2f}%" if y_xirr else "N/A"
 
-            # [v6.3 Fix] 年度 ROI 公式修正
-            # 公式: (已實現 + 股息) / (年初庫存成本 + 本期買入)
             y_start_date = date(y, 1, 1)
             y_start_cost_basis = get_historical_cost_basis(df, y_start_date, selected_tickers, strategy_filter)
             
             y_roi_denominator = y_start_cost_basis + y_buy
             y_roi = "N/A"
             if y_roi_denominator > 0:
-                # 分子 = 已實現 + 股息 (等同於: 年末庫存 + 賣出 + 股息 - 年初庫存 - 買入)
                 y_roi_val = ((y_realized + y_div) / y_roi_denominator) * 100
                 y_roi = f"{y_roi_val:.2f}%"
 
-            y_yoc = "N/A" # YoC 需即時庫存配合，歷史較難回推精準，維持原邏輯
+            y_yoc = "N/A"
             if y_buy > 0: y_yoc = f"{(y_div/y_buy)*100:.2f}%"
 
             row_data = {
@@ -364,8 +357,45 @@ def handle_transaction_submit(date_in, ticker, type_display, strategy_list, acti
     return True
 
 # ==========================================
-# 4. 儀表板與圖表
+# 4. 儀表板與圖表 (v6.4 New Allocation Charts)
 # ==========================================
+def render_allocation_charts(full_portfolio_df):
+    """資產配置圓餅圖 (v6.4 Added)"""
+    if full_portfolio_df.empty:
+        return
+    
+    st.markdown("#### 🥧 資產配置分析")
+    c1, c2, c3 = st.columns(3)
+    
+    base = alt.Chart(full_portfolio_df).encode(
+        theta=alt.Theta("庫存現值", stack=True)
+    )
+    
+    # 1. 種類配置
+    with c1:
+        pie_type = base.mark_arc(outerRadius=100).encode(
+            color=alt.Color("種類"),
+            tooltip=["種類", "庫存現值"]
+        ).properties(title="資產種類配置")
+        st.altair_chart(pie_type, use_container_width=True)
+        
+    # 2. 策略配置
+    with c2:
+        pie_strat = base.mark_arc(outerRadius=100).encode(
+            color=alt.Color("策略"),
+            tooltip=["策略", "庫存現值"]
+        ).properties(title="投資策略配置")
+        st.altair_chart(pie_strat, use_container_width=True)
+        
+    # 3. 持股佔比
+    with c3:
+        pie_ticker = base.mark_arc(outerRadius=100).encode(
+            color=alt.Color("代號", sort="-x"), # 依數值排序
+            order=alt.Order("庫存現值", sort="descending"),
+            tooltip=["代號", "庫存現值", "策略"]
+        ).properties(title="持股佔比 (市值)")
+        st.altair_chart(pie_ticker, use_container_width=True)
+
 def render_metrics_cards(summary, mode):
     if mode == "swing": 
         k1, k2, k3, k4 = st.columns(4)
@@ -417,21 +447,22 @@ def render_chart_swing(trade_log_df, strategy_filter=None):
             st.info("尚無交易紀錄")
 
 def render_chart_dividend_monthly(period_df):
+    """股息成長圖 (v6.4 Updated: 使用 Time Axis 支援完整互動)"""
     div_df = period_df[period_df['Action'] == '領息'].copy()
     if not div_df.empty:
         div_df['Date'] = pd.to_datetime(div_df['Date'])
-        div_df['Month'] = div_df['Date'].dt.strftime('%Y-%m')
         
-        # 設定預設顯示區間：最近 24 個月
-        max_date = div_df['Date'].max()
-        min_view_date = max_date - pd.DateOffset(months=24)
-        
+        # 使用 Date:T (timeUnit='yearmonth') 讓 Altair 自動處理時間軸，支援滑鼠拖曳與縮放
         chart = alt.Chart(div_df).mark_bar().encode(
-            x=alt.X('Month:O', title='月份', scale=alt.Scale(domain=sorted(div_df[div_df['Date'] >= min_view_date]['Month'].unique()))),
+            x=alt.X('Date:T', timeUnit='yearmonth', title='月份'), 
             y=alt.Y('Total_Amount:Q', title='股息金額'),
             color=alt.Color('Ticker:N', title='投資標的'),
-            tooltip=['Month', 'Ticker', 'Total_Amount']
-        ).properties(height=350).interactive(bind_x=True) # 啟用 X 軸互動 (平移)
+            tooltip=[
+                alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 
+                'Ticker', 
+                'Total_Amount'
+            ]
+        ).properties(height=350).interactive() # interactive() 啟用原生縮放與平移
         
         st.altair_chart(chart, use_container_width=True)
     else:
@@ -467,7 +498,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v6.3")
+st.title("📊 投資戰情室 v6.4")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -481,7 +512,11 @@ full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
 st.markdown("### 🌍 全資產總覽 (All Time)")
 total_summary, _, _ = analyze_period_advanced(df, df['Date'].min(), date.today(), None, full_portfolio_df, trade_log_df, None)
 if total_summary:
+    # 1. 指標卡片
     render_metrics_cards(total_summary, "general")
+    st.write("")
+    # 2. [v6.4 Feature] 資產配置圖表
+    render_allocation_charts(full_portfolio_df)
 
 st.divider()
 
