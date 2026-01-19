@@ -1,5 +1,5 @@
-# Version: v6.4 (Asset Allocation Charts, Fix Dividend Scrolling, Keep v6.3 Logic)
-# CTOSignature: Added Donut Charts for Allocation, Switched Dividend X-Axis to Time for Scrolling
+# Version: v6.5 (Fund Dual Currency Support TWD/USD)
+# CTOSignature: Added Currency Selector for Funds, Auto-add 'Currency' header to sheet, Conditional Calc
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -13,7 +13,7 @@ import altair as alt
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v6.4", layout="wide")
+st.set_page_config(page_title="投資戰情室 v6.5", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -37,7 +37,7 @@ ws_records = sh.worksheet("Records")
 ws_funds = sh.worksheet("Fund_Updates")
 
 # ==========================================
-# 2. 核心邏輯函數 (維持 v6.3)
+# 2. 核心邏輯函數
 # ==========================================
 
 @st.cache_data(ttl=3600) 
@@ -89,8 +89,19 @@ def normalize_data(df):
 def load_data():
     records_data = ws_records.get_all_records()
     df = pd.DataFrame(records_data)
-    funds_data = ws_funds.get_all_records()
-    df_funds = pd.DataFrame(funds_data)
+    
+    # [v6.5 Update] 自動檢查並修復基金表頭
+    try:
+        funds_data = ws_funds.get_all_records()
+        df_funds = pd.DataFrame(funds_data)
+        # 如果舊資料沒有 Currency 欄位，自動判定為 USD (相容性)
+        if not df_funds.empty and 'Currency' not in df_funds.columns:
+            df_funds['Currency'] = 'USD'
+            # 自動修復 Sheet Header (只做一次)
+            if ws_funds.cell(1, 4).value != "Currency":
+                ws_funds.update_cell(1, 4, "Currency")
+    except:
+        df_funds = pd.DataFrame()
     
     if df.empty: return df, df_funds, 32.0
         
@@ -169,10 +180,20 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
                 current_price, volatility = get_stock_data(ticker)
                 market_value = current_price * data['shares']
             elif data['type'] == '基金':
+                # [v6.5 Update] 基金雙幣別計算邏輯
                 if not df_funds.empty and ticker in df_funds['Ticker'].values:
-                    usd_net = df_funds[df_funds['Ticker'] == ticker]['Net_Value_USD'].values[0]
-                    current_price = usd_net * current_usd_rate
-                    market_value = data['shares'] * usd_net * current_usd_rate
+                    fund_row = df_funds[df_funds['Ticker'] == ticker].iloc[0]
+                    net_val = fund_row['Net_Value_USD'] # 欄位名稱保持相容
+                    currency = 'USD'
+                    if 'Currency' in df_funds.columns:
+                        currency = fund_row['Currency']
+                    
+                    if currency == 'TWD':
+                        current_price = net_val # 台幣基金直接用淨值
+                        market_value = data['shares'] * net_val
+                    else:
+                        current_price = net_val * current_usd_rate # 美元基金乘匯率
+                        market_value = data['shares'] * net_val * current_usd_rate
             
             avg_cost = data['total_cost'] / data['shares']
             unrealized_pl = market_value - data['total_cost']
@@ -357,43 +378,23 @@ def handle_transaction_submit(date_in, ticker, type_display, strategy_list, acti
     return True
 
 # ==========================================
-# 4. 儀表板與圖表 (v6.4 New Allocation Charts)
+# 4. 儀表板與圖表
 # ==========================================
 def render_allocation_charts(full_portfolio_df):
-    """資產配置圓餅圖 (v6.4 Added)"""
-    if full_portfolio_df.empty:
-        return
+    if full_portfolio_df.empty: return
     
     st.markdown("#### 🥧 資產配置分析")
     c1, c2, c3 = st.columns(3)
+    base = alt.Chart(full_portfolio_df).encode(theta=alt.Theta("庫存現值", stack=True))
     
-    base = alt.Chart(full_portfolio_df).encode(
-        theta=alt.Theta("庫存現值", stack=True)
-    )
-    
-    # 1. 種類配置
     with c1:
-        pie_type = base.mark_arc(outerRadius=100).encode(
-            color=alt.Color("種類"),
-            tooltip=["種類", "庫存現值"]
-        ).properties(title="資產種類配置")
+        pie_type = base.mark_arc(outerRadius=100).encode(color=alt.Color("種類"), tooltip=["種類", "庫存現值"]).properties(title="資產種類配置")
         st.altair_chart(pie_type, use_container_width=True)
-        
-    # 2. 策略配置
     with c2:
-        pie_strat = base.mark_arc(outerRadius=100).encode(
-            color=alt.Color("策略"),
-            tooltip=["策略", "庫存現值"]
-        ).properties(title="投資策略配置")
+        pie_strat = base.mark_arc(outerRadius=100).encode(color=alt.Color("策略"), tooltip=["策略", "庫存現值"]).properties(title="投資策略配置")
         st.altair_chart(pie_strat, use_container_width=True)
-        
-    # 3. 持股佔比
     with c3:
-        pie_ticker = base.mark_arc(outerRadius=100).encode(
-            color=alt.Color("代號", sort="-x"), # 依數值排序
-            order=alt.Order("庫存現值", sort="descending"),
-            tooltip=["代號", "庫存現值", "策略"]
-        ).properties(title="持股佔比 (市值)")
+        pie_ticker = base.mark_arc(outerRadius=100).encode(color=alt.Color("代號", sort="-x"), order=alt.Order("庫存現值", sort="descending"), tooltip=["代號", "庫存現值", "策略"]).properties(title="持股佔比 (市值)")
         st.altair_chart(pie_ticker, use_container_width=True)
 
 def render_metrics_cards(summary, mode):
@@ -447,22 +448,16 @@ def render_chart_swing(trade_log_df, strategy_filter=None):
             st.info("尚無交易紀錄")
 
 def render_chart_dividend_monthly(period_df):
-    """股息成長圖 (v6.4 Updated: 使用 Time Axis 支援完整互動)"""
     div_df = period_df[period_df['Action'] == '領息'].copy()
     if not div_df.empty:
         div_df['Date'] = pd.to_datetime(div_df['Date'])
         
-        # 使用 Date:T (timeUnit='yearmonth') 讓 Altair 自動處理時間軸，支援滑鼠拖曳與縮放
         chart = alt.Chart(div_df).mark_bar().encode(
             x=alt.X('Date:T', timeUnit='yearmonth', title='月份'), 
             y=alt.Y('Total_Amount:Q', title='股息金額'),
             color=alt.Color('Ticker:N', title='投資標的'),
-            tooltip=[
-                alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 
-                'Ticker', 
-                'Total_Amount'
-            ]
-        ).properties(height=350).interactive() # interactive() 啟用原生縮放與平移
+            tooltip=[alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 'Ticker', 'Total_Amount']
+        ).properties(height=350).interactive()
         
         st.altair_chart(chart, use_container_width=True)
     else:
@@ -498,7 +493,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v6.4")
+st.title("📊 投資戰情室 v6.5")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -512,10 +507,8 @@ full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
 st.markdown("### 🌍 全資產總覽 (All Time)")
 total_summary, _, _ = analyze_period_advanced(df, df['Date'].min(), date.today(), None, full_portfolio_df, trade_log_df, None)
 if total_summary:
-    # 1. 指標卡片
     render_metrics_cards(total_summary, "general")
     st.write("")
-    # 2. [v6.4 Feature] 資產配置圖表
     render_allocation_charts(full_portfolio_df)
 
 st.divider()
@@ -626,15 +619,29 @@ if not full_portfolio_df.empty:
                 else:
                     success = handle_transaction_submit(d_date, d_ticker, d_type, d_strat, d_action, d_price, d_shares, d_fee, d_total, d_note)
                     if success: st.success(f"已儲存 {d_ticker}！"); st.cache_data.clear()
+    
+    # [v6.5 Feature] 基金雙幣別更新表單
     with col_input2:
         with st.form("bottom_fund_form", clear_on_submit=True):
             st.markdown("**💵 更新基金淨值**")
-            f_ticker = st.text_input("基金代號").upper(); f_net_val = st.number_input("最新淨值 (USD)", min_value=0.0, format="%.4f")
-            st.write(""); f_btn = st.form_submit_button("更新", use_container_width=True)
+            f_ticker = st.text_input("基金代號").upper()
+            f_net_val = st.number_input("最新淨值", min_value=0.0, format="%.4f")
+            f_currency = st.selectbox("幣別", ["USD", "TWD"]) # 新增幣別選項
+            st.write("")
+            f_btn = st.form_submit_button("更新", use_container_width=True)
+            
             if f_btn:
                 try:
-                    cell = ws_funds.find(f_ticker); ws_funds.update_cell(cell.row, 2, f_net_val); ws_funds.update_cell(cell.row, 3, str(datetime.now().date()))
-                except: ws_funds.append_row([f_ticker, f_net_val, str(datetime.now().date())])
+                    # 搜尋既有列
+                    cell = ws_funds.find(f_ticker)
+                    ws_funds.update_cell(cell.row, 2, f_net_val)
+                    ws_funds.update_cell(cell.row, 3, str(datetime.now().date()))
+                    # 寫入幣別 (如果工作表沒有第 4 欄，gspread 會自動處理嗎？通常需要 ensure cell)
+                    # 這裡直接更新第 4 欄 (Currency)
+                    ws_funds.update_cell(cell.row, 4, f_currency)
+                except:
+                    # 新增列：Ticker, Value, Date, Currency
+                    ws_funds.append_row([f_ticker, f_net_val, str(datetime.now().date()), f_currency])
                 st.success("更新成功"); st.cache_data.clear()
 else:
     st.info("尚無資料，請先新增第一筆交易。")
