@@ -1,5 +1,5 @@
-# Version: v6.7 (Merged Layout, Colored Stock/Fund PnL Chart)
-# CTOSignature: Layout Merge (Overview inside Tabs), Trade Log includes Type, Multi-line PnL Chart
+# Version: v6.8 (Slim Sidebar, Monthly River Chart PnL)
+# CTOSignature: Layout Ratio [1, 7], Removed PnL CumSum, Switched to Area Chart (River)
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -13,7 +13,7 @@ import altair as alt
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v6.7", layout="wide")
+st.set_page_config(page_title="投資戰情室 v6.8", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -159,7 +159,6 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
                 p['realized_pl'] += pnl
                 p['total_cost'] -= cost_of_sold_shares
                 p['shares'] -= qty
-                # [v6.7 Fix] 增加 Type 到 trade_log 以便畫圖區分
                 trade_log.append({'Date': date_txn, 'Ticker': ticker, 'Strategy': p['strategy'], 'Type': p['type'], 'PnL': pnl, 'SellAmount': amount})
                 if p['shares'] <= 0.001: p['shares'] = 0; p['total_cost'] = 0
                     
@@ -405,7 +404,7 @@ def render_allocation_charts(full_portfolio_df):
         st.altair_chart(pie_ticker, use_container_width=True)
 
 def render_global_monthly_pnl_colored(trade_log_df, df_records):
-    """[v6.7 New] 全域累積已實現損益波段圖 (分 股票/基金 顏色)"""
+    """[v6.8 New] 已實現損益 (含股息) - 河流圖 (不累積)"""
     # 1. 處理已實現損益 (來自 trade_log，已有 Type)
     pnl_df = pd.DataFrame()
     if not trade_log_df.empty:
@@ -425,27 +424,21 @@ def render_global_monthly_pnl_colored(trade_log_df, df_records):
     if combined.empty:
         return
         
-    # 4. 分組運算：按 Month 和 Type 加總，並計算累積值
-    # 先填補 Type 空值 (防呆)
+    # 4. 分組運算：按 Month 和 Type 加總 (不進行 CumSum)
     combined['Type'] = combined['Type'].fillna('股票') 
-    
-    # 依照月份排序
     combined = combined.sort_values('Month')
     
     # 產生樞紐資料以便繪圖 (Month, Type -> Sum PnL)
     grouped = combined.groupby(['Month', 'Type'])['PnL'].sum().reset_index()
     
-    # 計算各種類的累積值 (Cumulative Sum per Group)
-    grouped['Cumulative_PnL'] = grouped.groupby('Type')['PnL'].cumsum()
+    # 5. 繪圖 (Stacked Area Chart / 河流圖效果)
+    st.markdown("#### 🌊 已實現損益 (含股息) - 資產類別分佈")
     
-    # 5. 繪圖 (多重折線圖)
-    st.markdown("#### 📈 累積已實現損益 (含股息) - 資產類別分佈")
-    
-    chart = alt.Chart(grouped).mark_line(point=True).encode(
+    chart = alt.Chart(grouped).mark_area(opacity=0.7).encode(
         x=alt.X('Month:O', title='月份'),
-        y=alt.Y('Cumulative_PnL:Q', title='累積已實現獲利 ($)'),
+        y=alt.Y('PnL:Q', title='單月已實現損益 ($)', stack='zero'),
         color=alt.Color('Type:N', title='資產種類', scale=alt.Scale(domain=['股票', '基金'], range=['#1f77b4', '#ff7f0e'])),
-        tooltip=['Month', 'Type', 'Cumulative_PnL']
+        tooltip=['Month', 'Type', 'PnL']
     ).properties(height=350).interactive()
     
     st.altair_chart(chart, use_container_width=True)
@@ -546,7 +539,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v6.7")
+st.title("📊 投資戰情室 v6.8")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -556,29 +549,23 @@ if df.empty:
 all_tickers = df['Ticker'].unique().tolist()
 full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
 
-# [v6.7 Change] 移除最上方的獨立全域總覽，直接進入左右分欄
-
-# --- 2. 左右分欄篩選與報表 ---
-col_filter, col_display = st.columns([1, 3])
+# [v6.8 New Layout] 左右欄比例從 1:3 調整為 1:7 (左欄縮小一半)
+col_filter, col_display = st.columns([1, 7])
 
 with col_filter:
-    st.subheader("🔍 篩選條件")
+    st.subheader("🔍 篩選")
     min_date = df['Date'].min()
     max_date = date.today()
-    # 這裡的日期選擇預設為全區間，若使用者未更動，即視為「未選擇(使用預設)」
     analysis_start = st.date_input("開始日期", value=min_date, min_value=min_date, max_value=max_date)
     analysis_end = st.date_input("結束日期", value=max_date, min_value=min_date, max_value=max_date)
-    selected_tickers = st.multiselect("投資標的 (可複選)", all_tickers, default=None)
-    st.caption("💡 若未選擇標的，右側顯示全總覽與策略彙整。")
+    selected_tickers = st.multiselect("投資標的", all_tickers, default=None)
 
 with col_display:
     if not selected_tickers:
-        # [v6.7 New Layout] 未選擇標的時，顯示整合的三個分頁
         t_all, t_swing, t_div = st.tabs(["🌍 全總覽", "⚡ 波段", "💰 存股"])
         
-        # 分頁 1: 全總覽 (整合原本上方的內容)
+        # 分頁 1: 全總覽
         with t_all:
-            # 根據篩選日期計算指標
             total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
             if total_summary:
                 render_metrics_cards(total_summary, "general")
@@ -587,19 +574,18 @@ with col_display:
                 with g_col1:
                     render_allocation_charts(full_portfolio_df)
                 with g_col2:
-                    # [v6.7 New] 使用顏色區分 股票/基金
+                    # [v6.8 New] 已實現損益 (不累積) + 河流圖效果
                     render_global_monthly_pnl_colored(trade_log_df, df)
         
-        # 分頁 2: 波段 (整合)
+        # 分頁 2: 波段
         with t_swing:
             render_strategy_view(df, analysis_start, analysis_end, None, "波段", full_portfolio_df, trade_log_df, "swing")
             
-        # 分頁 3: 存股 (整合)
+        # 分頁 3: 存股
         with t_div:
             render_strategy_view(df, analysis_start, analysis_end, None, "存股", full_portfolio_df, trade_log_df, "dividend")
             
     else:
-        # 選擇標的時，維持既有邏輯 (依標的顯示策略)
         ticker_tabs = st.tabs([f"🔍 {t}" for t in selected_tickers])
         for i, ticker in enumerate(selected_tickers):
             with ticker_tabs[i]:
