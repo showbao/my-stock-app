@@ -1,5 +1,5 @@
-# Version: v6.9 (Layout Ratio 1:4, PnL Line Chart with Recent Year Default Focus)
-# CTOSignature: Layout Balanced, PnL Line Chart restored, X-Axis Domain limited to recent year but scrollable
+# Version: v7.0 (Layout Ratio [2,5], Cumulative River Chart with Time Focus)
+# CTOSignature: Layout Optimized for visibility, PnL switched to Cumulative Stacked Area (River) with recent-year default domain
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -13,7 +13,7 @@ import altair as alt
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v6.9", layout="wide")
+st.set_page_config(page_title="投資戰情室 v7.0", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -404,49 +404,55 @@ def render_allocation_charts(full_portfolio_df):
         st.altair_chart(pie_ticker, use_container_width=True)
 
 def render_global_monthly_pnl_colored(trade_log_df, df_records):
-    """[v6.9 Updated] 已實現損益 (含股息) - 折線圖 + 最近一年預設視野"""
-    # 1. 處理已實現損益 (來自 trade_log，已有 Type)
+    """[v7.0 New] 累積已實現損益 (含股息) - 堆疊面積圖 (河流圖) + 最近一年預設視野"""
+    # 1. 處理已實現損益
     pnl_df = pd.DataFrame()
     if not trade_log_df.empty:
         pnl_df = trade_log_df[['Date', 'PnL', 'Type']].copy()
         pnl_df['Date'] = pd.to_datetime(pnl_df['Date'])
         pnl_df['Month'] = pnl_df['Date'].dt.strftime('%Y-%m')
         
-    # 2. 處理領息 (來自 df_records，需要補上 Type)
+    # 2. 處理領息
     div_df = df_records[df_records['Action'] == '領息'][['Date', 'Total_Amount', 'Type']].copy()
     if not div_df.empty:
         div_df['Date'] = pd.to_datetime(div_df['Date'])
         div_df['Month'] = div_df['Date'].dt.strftime('%Y-%m')
         div_df = div_df.rename(columns={'Total_Amount': 'PnL'})
     
-    # 3. 合併資料
+    # 3. 合併並排序
     combined = pd.concat([pnl_df, div_df], ignore_index=True)
     if combined.empty:
         return
         
-    # 4. 分組運算
     combined['Type'] = combined['Type'].fillna('股票') 
+    
+    # [Critical] 必須先依月份排序，才能正確計算累積
     combined = combined.sort_values('Month')
     
+    # 4. 樞紐運算：算出每個月、每種類別的「當月總和」
     grouped = combined.groupby(['Month', 'Type'])['PnL'].sum().reset_index()
     
-    # [v6.9 New] 增加 Date 欄位以支援 Time Scale
+    # [Critical] 增加 Date 欄位以支援 Time Scale (Altair 需要 Date 格式)
     grouped['Date'] = pd.to_datetime(grouped['Month'])
+    grouped = grouped.sort_values('Date') # 再次確保排序
+    
+    # 5. 計算累積 (Cumulative Sum) - 針對每個 Type 獨立累積
+    grouped['Cumulative_PnL'] = grouped.groupby('Type')['PnL'].cumsum()
     
     # 設定預設視野 (Domain) 為最近 12 個月
     domain_end = datetime.now().date()
     domain_start = domain_end - timedelta(days=365)
 
-    # 5. 繪圖 (折線圖 + X軸 Scale Domain)
-    st.markdown("#### 📈 已實現損益 (含股息) - 資產類別分佈")
+    # 6. 繪圖 (Stack Area Chart / River)
+    st.markdown("#### 🌊 累積已實現損益 (含股息) - 財富堆疊圖")
     
-    chart = alt.Chart(grouped).mark_line(point=True).encode(
-        # 使用 timeUnit='yearmonth' 並設定 domain，啟用平移與縮放
-        x=alt.X('Date:T', timeUnit='yearmonth', title='月份', scale=alt.Scale(domain=[domain_start, domain_end])),
-        y=alt.Y('PnL:Q', title='單月已實現損益 ($)'),
+    chart = alt.Chart(grouped).mark_area(opacity=0.7).encode(
+        x=alt.X('Date:T', timeUnit='yearmonth', title='月份', 
+                scale=alt.Scale(domain=[pd.to_datetime(domain_start), pd.to_datetime(domain_end)])), # 鎖定最近一年
+        y=alt.Y('Cumulative_PnL:Q', title='累積已實現獲利 ($)', stack=True), # 堆疊累積
         color=alt.Color('Type:N', title='資產種類', scale=alt.Scale(domain=['股票', '基金'], range=['#1f77b4', '#ff7f0e'])),
-        tooltip=[alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 'Type', 'PnL']
-    ).properties(height=350).interactive()
+        tooltip=[alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 'Type', 'Cumulative_PnL', 'PnL']
+    ).properties(height=350).interactive() # 啟用互動 (平移/縮放)
     
     st.altair_chart(chart, use_container_width=True)
 
@@ -546,7 +552,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v6.9")
+st.title("📊 投資戰情室 v7.0")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -556,8 +562,8 @@ if df.empty:
 all_tickers = df['Ticker'].unique().tolist()
 full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
 
-# [v6.9 New Layout] 左右欄比例從 1:7 調整回 1:4 (平衡版)
-col_filter, col_display = st.columns([1, 4])
+# [v7.0 New Layout] 調整為 2:5 (約 28% : 72%)，兼顧左欄操作與右側不截斷
+col_filter, col_display = st.columns([2, 5])
 
 with col_filter:
     st.subheader("🔍 篩選")
@@ -581,7 +587,7 @@ with col_display:
                 with g_col1:
                     render_allocation_charts(full_portfolio_df)
                 with g_col2:
-                    # [v6.9 New] 改回折線圖，並預設顯示最近一年 (可拖曳查看歷史)
+                    # [v7.0 New] 累積堆疊河流圖
                     render_global_monthly_pnl_colored(trade_log_df, df)
         
         # 分頁 2: 波段
