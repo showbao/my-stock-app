@@ -1,5 +1,5 @@
-# Version: v7.0 (Layout Ratio [2,5], Cumulative River Chart with Time Focus)
-# CTOSignature: Layout Optimized for visibility, PnL switched to Cumulative Stacked Area (River) with recent-year default domain
+# Version: v7.1 (Top Horizontal Filter Bar, Full Width Layout)
+# CTOSignature: Moved filters to top row [1,1,2], Removed vertical columns, Max chart width
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -13,7 +13,7 @@ import altair as alt
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v7.0", layout="wide")
+st.set_page_config(page_title="投資戰情室 v7.1", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -404,7 +404,7 @@ def render_allocation_charts(full_portfolio_df):
         st.altair_chart(pie_ticker, use_container_width=True)
 
 def render_global_monthly_pnl_colored(trade_log_df, df_records):
-    """[v7.0 New] 累積已實現損益 (含股息) - 堆疊面積圖 (河流圖) + 最近一年預設視野"""
+    """[v7.1 Updated] 累積已實現損益 (含股息) - 堆疊面積圖 + 時間軸修正"""
     # 1. 處理已實現損益
     pnl_df = pd.DataFrame()
     if not trade_log_df.empty:
@@ -425,34 +425,30 @@ def render_global_monthly_pnl_colored(trade_log_df, df_records):
         return
         
     combined['Type'] = combined['Type'].fillna('股票') 
-    
-    # [Critical] 必須先依月份排序，才能正確計算累積
     combined = combined.sort_values('Month')
     
-    # 4. 樞紐運算：算出每個月、每種類別的「當月總和」
+    # 4. 樞紐運算
     grouped = combined.groupby(['Month', 'Type'])['PnL'].sum().reset_index()
-    
-    # [Critical] 增加 Date 欄位以支援 Time Scale (Altair 需要 Date 格式)
     grouped['Date'] = pd.to_datetime(grouped['Month'])
-    grouped = grouped.sort_values('Date') # 再次確保排序
+    grouped = grouped.sort_values('Date')
     
-    # 5. 計算累積 (Cumulative Sum) - 針對每個 Type 獨立累積
+    # 5. 計算累積
     grouped['Cumulative_PnL'] = grouped.groupby('Type')['PnL'].cumsum()
     
-    # 設定預設視野 (Domain) 為最近 12 個月
+    # 設定預設視野
     domain_end = datetime.now().date()
     domain_start = domain_end - timedelta(days=365)
 
-    # 6. 繪圖 (Stack Area Chart / River)
+    # 6. 繪圖 (Stack Area)
     st.markdown("#### 🌊 累積已實現損益 (含股息) - 財富堆疊圖")
     
     chart = alt.Chart(grouped).mark_area(opacity=0.7).encode(
         x=alt.X('Date:T', timeUnit='yearmonth', title='月份', 
-                scale=alt.Scale(domain=[pd.to_datetime(domain_start), pd.to_datetime(domain_end)])), # 鎖定最近一年
-        y=alt.Y('Cumulative_PnL:Q', title='累積已實現獲利 ($)', stack=True), # 堆疊累積
+                scale=alt.Scale(domain=[pd.to_datetime(domain_start), pd.to_datetime(domain_end)])),
+        y=alt.Y('Cumulative_PnL:Q', title='累積已實現獲利 ($)', stack=True), 
         color=alt.Color('Type:N', title='資產種類', scale=alt.Scale(domain=['股票', '基金'], range=['#1f77b4', '#ff7f0e'])),
         tooltip=[alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 'Type', 'Cumulative_PnL', 'PnL']
-    ).properties(height=350).interactive() # 啟用互動 (平移/縮放)
+    ).properties(height=350).interactive()
     
     st.altair_chart(chart, use_container_width=True)
 
@@ -552,7 +548,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v7.0")
+st.title("📊 投資戰情室 v7.1")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -562,62 +558,64 @@ if df.empty:
 all_tickers = df['Ticker'].unique().tolist()
 full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
 
-# [v7.0 New Layout] 調整為 2:5 (約 28% : 72%)，兼顧左欄操作與右側不截斷
-col_filter, col_display = st.columns([2, 5])
-
-with col_filter:
-    st.subheader("🔍 篩選")
+# [v7.1 New Layout] 篩選列水平置頂
+st.markdown("#### 🔍 篩選條件")
+f1, f2, f3 = st.columns([1, 1, 2])
+with f1:
     min_date = df['Date'].min()
     max_date = date.today()
     analysis_start = st.date_input("開始日期", value=min_date, min_value=min_date, max_value=max_date)
+with f2:
     analysis_end = st.date_input("結束日期", value=max_date, min_value=min_date, max_value=max_date)
+with f3:
     selected_tickers = st.multiselect("投資標的", all_tickers, default=None)
 
-with col_display:
-    if not selected_tickers:
-        t_all, t_swing, t_div = st.tabs(["🌍 全總覽", "⚡ 波段", "💰 存股"])
+st.divider()
+
+# 主呈現區 (全寬度)
+if not selected_tickers:
+    t_all, t_swing, t_div = st.tabs(["🌍 全總覽", "⚡ 波段", "💰 存股"])
+    
+    # 分頁 1: 全總覽
+    with t_all:
+        total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
+        if total_summary:
+            render_metrics_cards(total_summary, "general")
+            st.write("")
+            g_col1, g_col2 = st.columns([1, 2])
+            with g_col1:
+                render_allocation_charts(full_portfolio_df)
+            with g_col2:
+                render_global_monthly_pnl_colored(trade_log_df, df)
+    
+    # 分頁 2: 波段
+    with t_swing:
+        render_strategy_view(df, analysis_start, analysis_end, None, "波段", full_portfolio_df, trade_log_df, "swing")
         
-        # 分頁 1: 全總覽
-        with t_all:
-            total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
-            if total_summary:
-                render_metrics_cards(total_summary, "general")
-                st.write("")
-                g_col1, g_col2 = st.columns([1, 2])
-                with g_col1:
-                    render_allocation_charts(full_portfolio_df)
-                with g_col2:
-                    # [v7.0 New] 累積堆疊河流圖
-                    render_global_monthly_pnl_colored(trade_log_df, df)
+    # 分頁 3: 存股
+    with t_div:
+        render_strategy_view(df, analysis_start, analysis_end, None, "存股", full_portfolio_df, trade_log_df, "dividend")
         
-        # 分頁 2: 波段
-        with t_swing:
-            render_strategy_view(df, analysis_start, analysis_end, None, "波段", full_portfolio_df, trade_log_df, "swing")
+else:
+    ticker_tabs = st.tabs([f"🔍 {t}" for t in selected_tickers])
+    for i, ticker in enumerate(selected_tickers):
+        with ticker_tabs[i]:
+            ticker_df = df[df['Ticker'] == ticker]
+            strategies_used = ticker_df['Strategy'].unique().tolist()
+            combined_strategies = ",".join([str(s) for s in strategies_used])
+            has_swing = "波段" in combined_strategies
+            has_div = "存股" in combined_strategies
             
-        # 分頁 3: 存股
-        with t_div:
-            render_strategy_view(df, analysis_start, analysis_end, None, "存股", full_portfolio_df, trade_log_df, "dividend")
-            
-    else:
-        ticker_tabs = st.tabs([f"🔍 {t}" for t in selected_tickers])
-        for i, ticker in enumerate(selected_tickers):
-            with ticker_tabs[i]:
-                ticker_df = df[df['Ticker'] == ticker]
-                strategies_used = ticker_df['Strategy'].unique().tolist()
-                combined_strategies = ",".join([str(s) for s in strategies_used])
-                has_swing = "波段" in combined_strategies
-                has_div = "存股" in combined_strategies
-                
-                if not (has_swing or has_div):
-                    st.warning(f"⚠️ {ticker} 尚未設定明確策略")
-                    render_strategy_view(df, analysis_start, analysis_end, [ticker], None, full_portfolio_df, trade_log_df, "general")
-                else:
-                    if has_swing:
-                        with st.expander("⚡ 策略分析：波段", expanded=True):
-                            render_strategy_view(df, analysis_start, analysis_end, [ticker], "波段", full_portfolio_df, trade_log_df, "swing")
-                    if has_div:
-                        with st.expander("💰 策略分析：存股", expanded=True):
-                            render_strategy_view(df, analysis_start, analysis_end, [ticker], "存股", full_portfolio_df, trade_log_df, "dividend")
+            if not (has_swing or has_div):
+                st.warning(f"⚠️ {ticker} 尚未設定明確策略")
+                render_strategy_view(df, analysis_start, analysis_end, [ticker], None, full_portfolio_df, trade_log_df, "general")
+            else:
+                if has_swing:
+                    with st.expander("⚡ 策略分析：波段", expanded=True):
+                        render_strategy_view(df, analysis_start, analysis_end, [ticker], "波段", full_portfolio_df, trade_log_df, "swing")
+                if has_div:
+                    with st.expander("💰 策略分析：存股", expanded=True):
+                        render_strategy_view(df, analysis_start, analysis_end, [ticker], "存股", full_portfolio_df, trade_log_df, "dividend")
 
 st.divider()
 
