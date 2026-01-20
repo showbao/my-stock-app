@@ -1,5 +1,5 @@
-# Version: v6.5 (Fund Dual Currency Support TWD/USD)
-# CTOSignature: Added Currency Selector for Funds, Auto-add 'Currency' header to sheet, Conditional Calc
+# Version: v6.7 (Merged Layout, Colored Stock/Fund PnL Chart)
+# CTOSignature: Layout Merge (Overview inside Tabs), Trade Log includes Type, Multi-line PnL Chart
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -13,7 +13,7 @@ import altair as alt
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v6.5", layout="wide")
+st.set_page_config(page_title="投資戰情室 v6.7", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -90,14 +90,11 @@ def load_data():
     records_data = ws_records.get_all_records()
     df = pd.DataFrame(records_data)
     
-    # [v6.5 Update] 自動檢查並修復基金表頭
     try:
         funds_data = ws_funds.get_all_records()
         df_funds = pd.DataFrame(funds_data)
-        # 如果舊資料沒有 Currency 欄位，自動判定為 USD (相容性)
         if not df_funds.empty and 'Currency' not in df_funds.columns:
             df_funds['Currency'] = 'USD'
-            # 自動修復 Sheet Header (只做一次)
             if ws_funds.cell(1, 4).value != "Currency":
                 ws_funds.update_cell(1, 4, "Currency")
     except:
@@ -162,7 +159,8 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
                 p['realized_pl'] += pnl
                 p['total_cost'] -= cost_of_sold_shares
                 p['shares'] -= qty
-                trade_log.append({'Date': date_txn, 'Ticker': ticker, 'Strategy': p['strategy'], 'PnL': pnl, 'SellAmount': amount})
+                # [v6.7 Fix] 增加 Type 到 trade_log 以便畫圖區分
+                trade_log.append({'Date': date_txn, 'Ticker': ticker, 'Strategy': p['strategy'], 'Type': p['type'], 'PnL': pnl, 'SellAmount': amount})
                 if p['shares'] <= 0.001: p['shares'] = 0; p['total_cost'] = 0
                     
         elif action == '領息':
@@ -180,19 +178,18 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
                 current_price, volatility = get_stock_data(ticker)
                 market_value = current_price * data['shares']
             elif data['type'] == '基金':
-                # [v6.5 Update] 基金雙幣別計算邏輯
                 if not df_funds.empty and ticker in df_funds['Ticker'].values:
                     fund_row = df_funds[df_funds['Ticker'] == ticker].iloc[0]
-                    net_val = fund_row['Net_Value_USD'] # 欄位名稱保持相容
+                    net_val = fund_row['Net_Value_USD']
                     currency = 'USD'
                     if 'Currency' in df_funds.columns:
                         currency = fund_row['Currency']
                     
                     if currency == 'TWD':
-                        current_price = net_val # 台幣基金直接用淨值
+                        current_price = net_val
                         market_value = data['shares'] * net_val
                     else:
-                        current_price = net_val * current_usd_rate # 美元基金乘匯率
+                        current_price = net_val * current_usd_rate
                         market_value = data['shares'] * net_val * current_usd_rate
             
             avg_cost = data['total_cost'] / data['shares']
@@ -210,7 +207,16 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
                 "成本殖利率%": round(yield_on_cost, 2), "含息總報%": round(roi_total, 2), "已領股息": round(data['dividend_collected'], 0),
                 "填息": fill_status, "總成本": round(data['total_cost'], 0)
             })
-    return pd.DataFrame(results), pd.DataFrame(trade_log)
+    
+    pf_df = pd.DataFrame(results)
+    if not pf_df.empty:
+        total_mv = pf_df['庫存現值'].sum()
+        if total_mv > 0:
+            pf_df['佔比%'] = (pf_df['庫存現值'] / total_mv * 100).round(1)
+        else:
+            pf_df['佔比%'] = 0.0
+    
+    return pf_df, pd.DataFrame(trade_log)
 
 def get_historical_cost_basis(df, cutoff_date, selected_tickers=None, strategy_filter=None):
     hist_df = df[df['Date'] < cutoff_date].sort_values('Date')
@@ -384,18 +390,65 @@ def render_allocation_charts(full_portfolio_df):
     if full_portfolio_df.empty: return
     
     st.markdown("#### 🥧 資產配置分析")
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     base = alt.Chart(full_portfolio_df).encode(theta=alt.Theta("庫存現值", stack=True))
     
     with c1:
-        pie_type = base.mark_arc(outerRadius=100).encode(color=alt.Color("種類"), tooltip=["種類", "庫存現值"]).properties(title="資產種類配置")
+        pie_type = base.mark_arc(outerRadius=100).encode(color=alt.Color("種類"), tooltip=["種類", "庫存現值", "佔比%"]).properties(title="資產種類配置")
         st.altair_chart(pie_type, use_container_width=True)
     with c2:
-        pie_strat = base.mark_arc(outerRadius=100).encode(color=alt.Color("策略"), tooltip=["策略", "庫存現值"]).properties(title="投資策略配置")
-        st.altair_chart(pie_strat, use_container_width=True)
-    with c3:
-        pie_ticker = base.mark_arc(outerRadius=100).encode(color=alt.Color("代號", sort="-x"), order=alt.Order("庫存現值", sort="descending"), tooltip=["代號", "庫存現值", "策略"]).properties(title="持股佔比 (市值)")
+        pie_ticker = base.mark_arc(outerRadius=100).encode(
+            color=alt.Color("代號", sort="-x"), 
+            order=alt.Order("庫存現值", sort="descending"), 
+            tooltip=["代號", "庫存現值", "佔比%", "策略"]
+        ).properties(title="持股佔比 (市值)")
         st.altair_chart(pie_ticker, use_container_width=True)
+
+def render_global_monthly_pnl_colored(trade_log_df, df_records):
+    """[v6.7 New] 全域累積已實現損益波段圖 (分 股票/基金 顏色)"""
+    # 1. 處理已實現損益 (來自 trade_log，已有 Type)
+    pnl_df = pd.DataFrame()
+    if not trade_log_df.empty:
+        pnl_df = trade_log_df[['Date', 'PnL', 'Type']].copy()
+        pnl_df['Date'] = pd.to_datetime(pnl_df['Date'])
+        pnl_df['Month'] = pnl_df['Date'].dt.strftime('%Y-%m')
+        
+    # 2. 處理領息 (來自 df_records，需要補上 Type)
+    div_df = df_records[df_records['Action'] == '領息'][['Date', 'Total_Amount', 'Type']].copy()
+    if not div_df.empty:
+        div_df['Date'] = pd.to_datetime(div_df['Date'])
+        div_df['Month'] = div_df['Date'].dt.strftime('%Y-%m')
+        div_df = div_df.rename(columns={'Total_Amount': 'PnL'}) # 統一欄位名稱
+    
+    # 3. 合併資料
+    combined = pd.concat([pnl_df, div_df], ignore_index=True)
+    if combined.empty:
+        return
+        
+    # 4. 分組運算：按 Month 和 Type 加總，並計算累積值
+    # 先填補 Type 空值 (防呆)
+    combined['Type'] = combined['Type'].fillna('股票') 
+    
+    # 依照月份排序
+    combined = combined.sort_values('Month')
+    
+    # 產生樞紐資料以便繪圖 (Month, Type -> Sum PnL)
+    grouped = combined.groupby(['Month', 'Type'])['PnL'].sum().reset_index()
+    
+    # 計算各種類的累積值 (Cumulative Sum per Group)
+    grouped['Cumulative_PnL'] = grouped.groupby('Type')['PnL'].cumsum()
+    
+    # 5. 繪圖 (多重折線圖)
+    st.markdown("#### 📈 累積已實現損益 (含股息) - 資產類別分佈")
+    
+    chart = alt.Chart(grouped).mark_line(point=True).encode(
+        x=alt.X('Month:O', title='月份'),
+        y=alt.Y('Cumulative_PnL:Q', title='累積已實現獲利 ($)'),
+        color=alt.Color('Type:N', title='資產種類', scale=alt.Scale(domain=['股票', '基金'], range=['#1f77b4', '#ff7f0e'])),
+        tooltip=['Month', 'Type', 'Cumulative_PnL']
+    ).properties(height=350).interactive()
+    
+    st.altair_chart(chart, use_container_width=True)
 
 def render_metrics_cards(summary, mode):
     if mode == "swing": 
@@ -493,7 +546,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v6.5")
+st.title("📊 投資戰情室 v6.7")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -503,15 +556,7 @@ if df.empty:
 all_tickers = df['Ticker'].unique().tolist()
 full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
 
-# --- 1. 最上方：全域總覽區 ---
-st.markdown("### 🌍 全資產總覽 (All Time)")
-total_summary, _, _ = analyze_period_advanced(df, df['Date'].min(), date.today(), None, full_portfolio_df, trade_log_df, None)
-if total_summary:
-    render_metrics_cards(total_summary, "general")
-    st.write("")
-    render_allocation_charts(full_portfolio_df)
-
-st.divider()
+# [v6.7 Change] 移除最上方的獨立全域總覽，直接進入左右分欄
 
 # --- 2. 左右分欄篩選與報表 ---
 col_filter, col_display = st.columns([1, 3])
@@ -520,19 +565,41 @@ with col_filter:
     st.subheader("🔍 篩選條件")
     min_date = df['Date'].min()
     max_date = date.today()
+    # 這裡的日期選擇預設為全區間，若使用者未更動，即視為「未選擇(使用預設)」
     analysis_start = st.date_input("開始日期", value=min_date, min_value=min_date, max_value=max_date)
     analysis_end = st.date_input("結束日期", value=max_date, min_value=min_date, max_value=max_date)
     selected_tickers = st.multiselect("投資標的 (可複選)", all_tickers, default=None)
-    st.caption("💡 未選擇標的則顯示所有策略彙整。")
+    st.caption("💡 若未選擇標的，右側顯示全總覽與策略彙整。")
 
 with col_display:
     if not selected_tickers:
-        t1, t2 = st.tabs(["⚡ 波段", "💰 存股"])
-        with t1:
+        # [v6.7 New Layout] 未選擇標的時，顯示整合的三個分頁
+        t_all, t_swing, t_div = st.tabs(["🌍 全總覽", "⚡ 波段", "💰 存股"])
+        
+        # 分頁 1: 全總覽 (整合原本上方的內容)
+        with t_all:
+            # 根據篩選日期計算指標
+            total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
+            if total_summary:
+                render_metrics_cards(total_summary, "general")
+                st.write("")
+                g_col1, g_col2 = st.columns([1, 2])
+                with g_col1:
+                    render_allocation_charts(full_portfolio_df)
+                with g_col2:
+                    # [v6.7 New] 使用顏色區分 股票/基金
+                    render_global_monthly_pnl_colored(trade_log_df, df)
+        
+        # 分頁 2: 波段 (整合)
+        with t_swing:
             render_strategy_view(df, analysis_start, analysis_end, None, "波段", full_portfolio_df, trade_log_df, "swing")
-        with t2:
+            
+        # 分頁 3: 存股 (整合)
+        with t_div:
             render_strategy_view(df, analysis_start, analysis_end, None, "存股", full_portfolio_df, trade_log_df, "dividend")
+            
     else:
+        # 選擇標的時，維持既有邏輯 (依標的顯示策略)
         ticker_tabs = st.tabs([f"🔍 {t}" for t in selected_tickers])
         for i, ticker in enumerate(selected_tickers):
             with ticker_tabs[i]:
@@ -564,10 +631,16 @@ if not full_portfolio_df.empty:
     
     if not stocks_pf.empty:
         st.markdown("#### 📈 股票庫存")
-        s1, s2, s3 = st.columns(3)
+        s_cost = stocks_pf['總成本'].sum()
+        s_pl = stocks_pf['帳面損益'].sum()
+        s_div = stocks_pf['已領股息'].sum()
+        s_roi = ((s_pl + s_div) / s_cost * 100) if s_cost > 0 else 0
+        
+        s1, s2, s3, s4 = st.columns(4)
         s1.metric("股票總現值", f"${stocks_pf['庫存現值'].sum():,.0f}")
-        s2.metric("股票總成本", f"${stocks_pf['總成本'].sum():,.0f}")
-        s3.metric("股票帳面損益", f"${stocks_pf['帳面損益'].sum():,.0f}", delta_color="normal")
+        s2.metric("股票總成本", f"${s_cost:,.0f}")
+        s3.metric("股票帳面損益", f"${s_pl:,.0f}", delta_color="normal")
+        s4.metric("股票總報酬率", f"{s_roi:.2f}%")
     
     if not funds_pf.empty:
         st.markdown("#### 🛡️ 基金庫存")
@@ -582,7 +655,7 @@ if not full_portfolio_df.empty:
 
     st.write("") 
 
-    cols_show = ["代號", "種類", "庫存", "平均成本", "市價", "庫存現值", "帳面損益", "含息總報%", "策略"]
+    cols_show = ["代號", "種類", "佔比%", "庫存", "平均成本", "市價", "庫存現值", "帳面損益", "含息總報%", "策略"]
     event = st.dataframe(
         full_portfolio_df[cols_show], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="inventory_table"
     )
@@ -620,27 +693,21 @@ if not full_portfolio_df.empty:
                     success = handle_transaction_submit(d_date, d_ticker, d_type, d_strat, d_action, d_price, d_shares, d_fee, d_total, d_note)
                     if success: st.success(f"已儲存 {d_ticker}！"); st.cache_data.clear()
     
-    # [v6.5 Feature] 基金雙幣別更新表單
     with col_input2:
         with st.form("bottom_fund_form", clear_on_submit=True):
             st.markdown("**💵 更新基金淨值**")
             f_ticker = st.text_input("基金代號").upper()
             f_net_val = st.number_input("最新淨值", min_value=0.0, format="%.4f")
-            f_currency = st.selectbox("幣別", ["USD", "TWD"]) # 新增幣別選項
+            f_currency = st.selectbox("幣別", ["USD", "TWD"])
             st.write("")
             f_btn = st.form_submit_button("更新", use_container_width=True)
-            
             if f_btn:
                 try:
-                    # 搜尋既有列
                     cell = ws_funds.find(f_ticker)
                     ws_funds.update_cell(cell.row, 2, f_net_val)
                     ws_funds.update_cell(cell.row, 3, str(datetime.now().date()))
-                    # 寫入幣別 (如果工作表沒有第 4 欄，gspread 會自動處理嗎？通常需要 ensure cell)
-                    # 這裡直接更新第 4 欄 (Currency)
                     ws_funds.update_cell(cell.row, 4, f_currency)
                 except:
-                    # 新增列：Ticker, Value, Date, Currency
                     ws_funds.append_row([f_ticker, f_net_val, str(datetime.now().date()), f_currency])
                 st.success("更新成功"); st.cache_data.clear()
 else:
