@@ -1,5 +1,5 @@
-# Version: v7.1 (Top Horizontal Filter Bar, Full Width Layout)
-# CTOSignature: Moved filters to top row [1,1,2], Removed vertical columns, Max chart width
+# Version: v7.2 (Fix Pie Chart Clipping, Single Pie for Tickers Only)
+# CTOSignature: Layout Pie Chart to Full Width, Content focus on Tickers, Removed Type Pie
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -13,7 +13,7 @@ import altair as alt
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v7.1", layout="wide")
+st.set_page_config(page_title="投資戰情室 v7.2", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -386,25 +386,29 @@ def handle_transaction_submit(date_in, ticker, type_display, strategy_list, acti
 # 4. 儀表板與圖表
 # ==========================================
 def render_allocation_charts(full_portfolio_df):
+    """[v7.2 Fixed] 資產配置圓餅圖 - 單一甜甜圈圖解決截斷問題"""
     if full_portfolio_df.empty: return
     
-    st.markdown("#### 🥧 資產配置分析")
-    c1, c2 = st.columns(2)
-    base = alt.Chart(full_portfolio_df).encode(theta=alt.Theta("庫存現值", stack=True))
+    st.markdown("#### 🥧 資產配置 - 持股佔比")
     
-    with c1:
-        pie_type = base.mark_arc(outerRadius=100).encode(color=alt.Color("種類"), tooltip=["種類", "庫存現值", "佔比%"]).properties(title="資產種類配置")
-        st.altair_chart(pie_type, use_container_width=True)
-    with c2:
-        pie_ticker = base.mark_arc(outerRadius=100).encode(
-            color=alt.Color("代號", sort="-x"), 
-            order=alt.Order("庫存現值", sort="descending"), 
-            tooltip=["代號", "庫存現值", "佔比%", "策略"]
-        ).properties(title="持股佔比 (市值)")
-        st.altair_chart(pie_ticker, use_container_width=True)
+    # 建立基礎圖表
+    base = alt.Chart(full_portfolio_df).encode(
+        theta=alt.Theta("庫存現值", stack=True) 
+    )
+    
+    # 繪製圓餅 (甜甜圈模式)，顏色依據「代號」
+    # outerRadius 設定為彈性或適中大小，讓 layout 自動處理
+    pie = base.mark_arc(outerRadius=120, innerRadius=60).encode(
+        color=alt.Color("代號", title="投資標的", sort=alt.EncodingSortField(field="庫存現值", order="descending")),
+        order=alt.Order("庫存現值", sort="descending"),
+        tooltip=["代號", "庫存現值", "佔比%", "策略", "種類"]
+    )
+    
+    # 使用 full container width 解決截斷問題
+    st.altair_chart(pie, use_container_width=True)
 
 def render_global_monthly_pnl_colored(trade_log_df, df_records):
-    """[v7.1 Updated] 累積已實現損益 (含股息) - 堆疊面積圖 + 時間軸修正"""
+    """[v7.2 Kept] 累積已實現損益 (含股息) - 堆疊面積圖 + 時間軸修正"""
     # 1. 處理已實現損益
     pnl_df = pd.DataFrame()
     if not trade_log_df.empty:
@@ -548,7 +552,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v7.1")
+st.title("📊 投資戰情室 v7.2")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -558,7 +562,7 @@ if df.empty:
 all_tickers = df['Ticker'].unique().tolist()
 full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
 
-# [v7.1 New Layout] 篩選列水平置頂
+# [v7.1 Layout] 篩選列水平置頂
 st.markdown("#### 🔍 篩選條件")
 f1, f2, f3 = st.columns([1, 1, 2])
 with f1:
@@ -582,10 +586,17 @@ if not selected_tickers:
         if total_summary:
             render_metrics_cards(total_summary, "general")
             st.write("")
+            
+            # [v7.2 Fix] 資產配置圖與累積損益圖左右分佈
+            # 將圓餅圖獨立放在較寬的 column，或調整比例
             g_col1, g_col2 = st.columns([1, 2])
+            
             with g_col1:
+                # [v7.2 Update] 單一圓餅圖，不被截斷
                 render_allocation_charts(full_portfolio_df)
+                
             with g_col2:
+                # 累積堆疊河流圖
                 render_global_monthly_pnl_colored(trade_log_df, df)
     
     # 分頁 2: 波段
