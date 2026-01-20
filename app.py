@@ -1,5 +1,5 @@
-# Version: v6.8 (Slim Sidebar, Monthly River Chart PnL)
-# CTOSignature: Layout Ratio [1, 7], Removed PnL CumSum, Switched to Area Chart (River)
+# Version: v6.9 (Layout Ratio 1:4, PnL Line Chart with Recent Year Default Focus)
+# CTOSignature: Layout Balanced, PnL Line Chart restored, X-Axis Domain limited to recent year but scrollable
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -13,7 +13,7 @@ import altair as alt
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v6.8", layout="wide")
+st.set_page_config(page_title="投資戰情室 v6.9", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -404,7 +404,7 @@ def render_allocation_charts(full_portfolio_df):
         st.altair_chart(pie_ticker, use_container_width=True)
 
 def render_global_monthly_pnl_colored(trade_log_df, df_records):
-    """[v6.8 New] 已實現損益 (含股息) - 河流圖 (不累積)"""
+    """[v6.9 Updated] 已實現損益 (含股息) - 折線圖 + 最近一年預設視野"""
     # 1. 處理已實現損益 (來自 trade_log，已有 Type)
     pnl_df = pd.DataFrame()
     if not trade_log_df.empty:
@@ -417,28 +417,35 @@ def render_global_monthly_pnl_colored(trade_log_df, df_records):
     if not div_df.empty:
         div_df['Date'] = pd.to_datetime(div_df['Date'])
         div_df['Month'] = div_df['Date'].dt.strftime('%Y-%m')
-        div_df = div_df.rename(columns={'Total_Amount': 'PnL'}) # 統一欄位名稱
+        div_df = div_df.rename(columns={'Total_Amount': 'PnL'})
     
     # 3. 合併資料
     combined = pd.concat([pnl_df, div_df], ignore_index=True)
     if combined.empty:
         return
         
-    # 4. 分組運算：按 Month 和 Type 加總 (不進行 CumSum)
+    # 4. 分組運算
     combined['Type'] = combined['Type'].fillna('股票') 
     combined = combined.sort_values('Month')
     
-    # 產生樞紐資料以便繪圖 (Month, Type -> Sum PnL)
     grouped = combined.groupby(['Month', 'Type'])['PnL'].sum().reset_index()
     
-    # 5. 繪圖 (Stacked Area Chart / 河流圖效果)
-    st.markdown("#### 🌊 已實現損益 (含股息) - 資產類別分佈")
+    # [v6.9 New] 增加 Date 欄位以支援 Time Scale
+    grouped['Date'] = pd.to_datetime(grouped['Month'])
     
-    chart = alt.Chart(grouped).mark_area(opacity=0.7).encode(
-        x=alt.X('Month:O', title='月份'),
-        y=alt.Y('PnL:Q', title='單月已實現損益 ($)', stack='zero'),
+    # 設定預設視野 (Domain) 為最近 12 個月
+    domain_end = datetime.now().date()
+    domain_start = domain_end - timedelta(days=365)
+
+    # 5. 繪圖 (折線圖 + X軸 Scale Domain)
+    st.markdown("#### 📈 已實現損益 (含股息) - 資產類別分佈")
+    
+    chart = alt.Chart(grouped).mark_line(point=True).encode(
+        # 使用 timeUnit='yearmonth' 並設定 domain，啟用平移與縮放
+        x=alt.X('Date:T', timeUnit='yearmonth', title='月份', scale=alt.Scale(domain=[domain_start, domain_end])),
+        y=alt.Y('PnL:Q', title='單月已實現損益 ($)'),
         color=alt.Color('Type:N', title='資產種類', scale=alt.Scale(domain=['股票', '基金'], range=['#1f77b4', '#ff7f0e'])),
-        tooltip=['Month', 'Type', 'PnL']
+        tooltip=[alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 'Type', 'PnL']
     ).properties(height=350).interactive()
     
     st.altair_chart(chart, use_container_width=True)
@@ -539,7 +546,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v6.8")
+st.title("📊 投資戰情室 v6.9")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -549,8 +556,8 @@ if df.empty:
 all_tickers = df['Ticker'].unique().tolist()
 full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
 
-# [v6.8 New Layout] 左右欄比例從 1:3 調整為 1:7 (左欄縮小一半)
-col_filter, col_display = st.columns([1, 7])
+# [v6.9 New Layout] 左右欄比例從 1:7 調整回 1:4 (平衡版)
+col_filter, col_display = st.columns([1, 4])
 
 with col_filter:
     st.subheader("🔍 篩選")
@@ -574,7 +581,7 @@ with col_display:
                 with g_col1:
                     render_allocation_charts(full_portfolio_df)
                 with g_col2:
-                    # [v6.8 New] 已實現損益 (不累積) + 河流圖效果
+                    # [v6.9 New] 改回折線圖，並預設顯示最近一年 (可拖曳查看歷史)
                     render_global_monthly_pnl_colored(trade_log_df, df)
         
         # 分頁 2: 波段
