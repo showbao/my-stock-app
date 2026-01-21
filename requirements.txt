@@ -5,3 +5,5 @@ gspread
 oauth2client
 scipy
 altair
+numpy
+google-generativeai
