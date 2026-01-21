@@ -1,5 +1,5 @@
-# Version: v8.3 (Upgraded to Gemini 2.5 Flash)
-# CTOSignature: Model updated to 'gemini-2.5-flash', Added 'Model Checker' in Sidebar
+# Version: v8.4 (Clean Sidebar, Strict Fact AI, Conditional Inventory UI)
+# CTOSignature: Removed Sidebar Model Checker, Enhanced Prompt for Factuality, Moved Inventory UI inside Tabs
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -14,7 +14,7 @@ import google.generativeai as genai
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v8.3 (Gemini 2.5)", layout="wide")
+st.set_page_config(page_title="投資戰情室 v8.4", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -359,32 +359,34 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     return summary, period_df, years_df
 
 # ==========================================
-# 3. AI 教練核心邏輯 (Secrets Only)
+# 3. AI 教練核心邏輯 (Strict Fact-Based)
 # ==========================================
 def ask_gemini_coach(api_key, portfolio_summary_text):
-    """呼叫 Gemini API 進行投資診斷"""
     if not api_key: return "⚠️ 未偵測到 API Key，請檢查 Secrets 設定。"
-        
     try:
         genai.configure(api_key=api_key)
-        # [v8.3 Update] 使用最新的 Gemini 2.5 Flash 模型
-        # 若需要更強推理，可改為 'gemini-2.5-pro'
         model = genai.GenerativeModel('gemini-2.5-flash')
         
+        # [v8.4] Enhanced System Prompt for Strict Factuality
         prompt = f"""
-        你是一位專業、嚴格但富有洞察力的避險基金經理人與投資教練。
-        請根據以下使用者的投資組合數據進行分析，並給出具體的策略建議、風險警示與鼓勵。
-        請使用繁體中文回答，語氣專業且條理分明。
+        你是一位專業、嚴格且客觀的避險基金經理人與投資教練。
+        請根據以下使用者的投資組合數據進行分析，提供策略建議、風險警示。
+
+        【嚴格指令 - 重要】
+        1. **絕對事實導向**：你的分析必須 **完全基於** 下方提供的【投資組合數據摘要】。
+        2. **禁止幻覺**：絕對不要自行搜尋外部即時股價，也不要質疑數據的正確性。即使數據看起來與你認知的市場不同（例如價格延遲或已除息），請以提供的數字為準。
+        3. **數據一致性**：如果摘要中說「總庫存現值」是 X，你的回答就必須說是 X。不要自己重新計算或四捨五入導致數字不符。
+        4. **請使用繁體中文回答**。
 
         【投資組合數據摘要】
         {portfolio_summary_text}
 
-        【你的分析重點】
-        1. **資產配置健康度**：檢查是否有過度集中（單一標的佔比過高）或過度分散的問題。
-        2. **策略執行效率**：
-           - 針對「波段」策略：檢視勝率與獲利能力。如果勝率低於 50%，請給予停損或選股建議。
-           - 針對「存股」策略：檢視是否有「賺了股息賠了價差」的狀況（例如 YoC 高但帳面大賠）。
-        3. **風險警示**：指出潛在的最大風險點。
+        【分析架構】
+        1. **資產配置診斷**：針對目前的持股佔比（Concentration）與種類（Stock/Fund）給予評語。
+        2. **策略績效檢討**：
+           - 針對數據中的勝率、XIRR、已實現損益進行點評。
+           - 若勝率低於 50%，請給予停損建議。
+        3. **風險警示**：指出目前部位最大的風險來源。
         4. **下一步行動建議**：給出 3 點具體可執行的建議。
 
         請開始你的分析：
@@ -392,26 +394,26 @@ def ask_gemini_coach(api_key, portfolio_summary_text):
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"❌ AI 連線錯誤: {str(e)}\n請檢查 API Key 額度或確認您所在的區域是否支援 Gemini 2.5。"
+        return f"❌ AI 連線錯誤: {str(e)}\n請檢查 API Key 額度或網路狀態。"
 
 def prepare_data_for_ai(full_portfolio_df, summary_metrics):
     if full_portfolio_df.empty: return "目前無庫存資料。"
     top_holdings = full_portfolio_df.sort_values('庫存現值', ascending=False).head(5)
     holdings_str = ""
     for _, row in top_holdings.iterrows():
-        holdings_str += f"- {row['代號']} ({row['策略']}): 佔比 {row['佔比%']}%, 帳面損益 ${row['帳面損益']:,.0f}, 含息報酬 {row['含息總報%']}%\n"
+        holdings_str += f"- 代號 {row['代號']} ({row['策略']}): 市值 ${row['庫存現值']:,.0f} (佔比 {row['佔比%']}%), 帳面損益 ${row['帳面損益']:,.0f}, 含息報酬率 {row['含息總報%']}%\n"
     
     text_report = f"""
-    [整體績效]
+    [整體帳戶摘要]
     - 總庫存現值: ${summary_metrics['庫存現值']:,.0f}
-    - 累積總損益: ${summary_metrics['累積總損益']:,.0f}
-    - 未實現損益: ${summary_metrics['未實現損益']:,.0f}
-    - 已實現損益: ${summary_metrics['已實現損益']:,.0f}
-    - 已領股息: ${summary_metrics['已領股息']:,.0f}
+    - 累積總損益 (含已實現+未實現+股息): ${summary_metrics['累積總損益']:,.0f}
+    - 未實現損益 (帳面): ${summary_metrics['未實現損益']:,.0f}
+    - 已實現損益 (落袋): ${summary_metrics['已實現損益']:,.0f}
+    - 已領股息總額: ${summary_metrics['已領股息']:,.0f}
     - 年化報酬率 (XIRR): {summary_metrics['XIRR%']:.2f}%
     - 波段交易勝率: {summary_metrics['勝率%']:.1f}%
     
-    [前五大持股風險曝險]
+    [前五大重倉持股]
     {holdings_str}
     """
     return text_report
@@ -445,7 +447,6 @@ def handle_transaction_submit(date_in, ticker, type_display, strategy_list, acti
 # 4. 儀表板與圖表
 # ==========================================
 def render_allocation_charts(full_portfolio_df):
-    """[v7.2 Fixed] 資產配置圓餅圖 - 單一甜甜圈圖"""
     if full_portfolio_df.empty: return
     st.markdown("#### 🥧 資產配置 - 持股佔比")
     base = alt.Chart(full_portfolio_df).encode(theta=alt.Theta("庫存現值", stack=True))
@@ -457,7 +458,6 @@ def render_allocation_charts(full_portfolio_df):
     st.altair_chart(pie, use_container_width=True)
 
 def render_global_monthly_pnl_colored(trade_log_df, df_records):
-    """[v7.2 Kept] 累積已實現損益 (含股息) - 堆疊面積圖 + 時間軸修正"""
     pnl_df = pd.DataFrame()
     if not trade_log_df.empty:
         pnl_df = trade_log_df[['Date', 'PnL', 'Type']].copy()
@@ -578,10 +578,102 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
     else:
         st.info("此區間無相關數據")
 
+# [v8.4 New] 獨立封裝庫存管理區塊，以便在不同 Tab 呼叫
+def render_inventory_management(full_portfolio_df, df_records, key_prefix):
+    st.markdown("### 📦 庫存管理與交易登錄")
+    
+    if not full_portfolio_df.empty:
+        stocks_pf = full_portfolio_df[full_portfolio_df['種類'] == '股票']
+        funds_pf = full_portfolio_df[full_portfolio_df['種類'] == '基金']
+        
+        if not stocks_pf.empty:
+            st.markdown("#### 📈 股票庫存")
+            s_cost = stocks_pf['總成本'].sum()
+            s_pl = stocks_pf['帳面損益'].sum()
+            s_div = stocks_pf['已領股息'].sum()
+            s_roi = ((s_pl + s_div) / s_cost * 100) if s_cost > 0 else 0
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("股票總現值", f"${stocks_pf['庫存現值'].sum():,.0f}")
+            s2.metric("股票總成本", f"${s_cost:,.0f}")
+            s3.metric("股票帳面損益", f"${s_pl:,.0f}", delta_color="normal")
+            s4.metric("股票總報酬率", f"{s_roi:.2f}%")
+        
+        if not funds_pf.empty:
+            st.markdown("#### 🛡️ 基金庫存")
+            f1, f2, f3, f4 = st.columns(4)
+            f_cost = funds_pf['總成本'].sum()
+            f_pl = funds_pf['帳面損益'].sum()
+            f_roi = (f_pl / f_cost * 100) if f_cost > 0 else 0
+            f1.metric("基金總現值", f"${funds_pf['庫存現值'].sum():,.0f}")
+            f2.metric("基金總投入", f"${f_cost:,.0f}")
+            f3.metric("基金帳面損益", f"${f_pl:,.0f}", delta_color="normal")
+            f4.metric("基金總報酬率", f"{f_roi:.2f}%")
+
+        st.write("") 
+        cols_show = ["代號", "種類", "佔比%", "庫存", "平均成本", "市價", "庫存現值", "帳面損益", "含息總報%", "策略"]
+        # key 必須唯一，使用 prefix
+        event = st.dataframe(
+            full_portfolio_df[cols_show], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key=f"inventory_table_{key_prefix}"
+        )
+        
+        default_ticker = ""; default_strat = ["存股"]
+        if len(event.selection.rows) > 0:
+            selected_index = event.selection.rows[0]
+            selected_row = full_portfolio_df.iloc[selected_index]
+            default_ticker = selected_row['代號']
+            last_strat_str = df_records[df_records['Ticker'] == default_ticker].iloc[-1]['Strategy']
+            possible_strats = ["存股", "波段"]
+            for s in possible_strats:
+                if s in last_strat_str: default_strat = [s]; break
+            
+            st.divider()
+            st.markdown(f"#### 📂 {default_ticker} 歷史與操作")
+            target_hist = df_records[df_records['Ticker'] == default_ticker].sort_values('Date', ascending=False)
+            st.dataframe(target_hist[['Date', 'Action', 'Strategy', 'Price', 'Shares', 'Total_Amount']].head(5), use_container_width=True, hide_index=True)
+
+        col_input1, col_input2 = st.columns([2, 1])
+        with col_input1:
+            with st.form(f"bottom_entry_form_{key_prefix}", clear_on_submit=True):
+                st.markdown(f"**➕ 新增交易** {f'({default_ticker})' if default_ticker else ''}")
+                c1, c2, c3, c4 = st.columns(4)
+                with c1: d_date = st.date_input("日期")
+                with c1: d_ticker = st.text_input("代號", value=default_ticker).upper() # Double input for layout alignment
+                with c2: d_type = st.selectbox("種類", ["股票", "基金"]); d_action = st.selectbox("動作", ["買入", "賣出", "領息", "分割"])
+                with c3: d_strat = st.multiselect("策略", ["存股", "波段"], default=default_strat); d_price = st.number_input("單價", min_value=0.0, format="%.2f")
+                with c4: d_shares = st.number_input("股數", step=100.0); d_fee = st.number_input("手續費 (0自動算)", min_value=0)
+                c5, c6 = st.columns([3, 1])
+                with c5: d_total = st.number_input("總金額 (0自動算)", step=1000.0); d_note = st.text_input("備註")
+                with c6: st.write(""); st.write(""); submitted = st.form_submit_button("送出交易", use_container_width=True)
+                if submitted:
+                    if not d_ticker: st.error("請輸入代號")
+                    else:
+                        success = handle_transaction_submit(d_date, d_ticker, d_type, d_strat, d_action, d_price, d_shares, d_fee, d_total, d_note)
+                        if success: st.success(f"已儲存 {d_ticker}！"); st.cache_data.clear()
+        
+        with col_input2:
+            with st.form(f"bottom_fund_form_{key_prefix}", clear_on_submit=True):
+                st.markdown("**💵 更新基金淨值**")
+                f_ticker = st.text_input("基金代號").upper()
+                f_net_val = st.number_input("最新淨值", min_value=0.0, format="%.4f")
+                f_currency = st.selectbox("幣別", ["USD", "TWD"])
+                st.write("")
+                f_btn = st.form_submit_button("更新", use_container_width=True)
+                if f_btn:
+                    try:
+                        cell = ws_funds.find(f_ticker)
+                        ws_funds.update_cell(cell.row, 2, f_net_val)
+                        ws_funds.update_cell(cell.row, 3, str(datetime.now().date()))
+                        ws_funds.update_cell(cell.row, 4, f_currency)
+                    except:
+                        ws_funds.append_row([f_ticker, f_net_val, str(datetime.now().date()), f_currency])
+                    st.success("更新成功"); st.cache_data.clear()
+    else:
+        st.info("尚無資料，請先新增第一筆交易。")
+
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v8.3 (Gemini 2.5)")
+st.title("📊 投資戰情室 v8.4 (Gemini 2.5)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -591,23 +683,6 @@ if df.empty:
 all_tickers = df['Ticker'].unique().tolist()
 full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
 
-# [v8.3 Sidebar] 模型檢查工具
-with st.sidebar:
-    st.markdown("### 🤖 模型狀態檢查")
-    if st.button("列出可用模型"):
-        api_key = st.secrets.get("gemini_api_key", None)
-        if not api_key:
-            st.error("Secrets 中找不到 gemini_api_key")
-        else:
-            try:
-                genai.configure(api_key=api_key)
-                models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                st.success(f"連線成功！可用模型：")
-                st.json(models)
-            except Exception as e:
-                st.error(f"查詢失敗：{str(e)}")
-
-# [v7.1 Layout] 篩選列水平置頂
 st.markdown("#### 🔍 篩選條件")
 f1, f2, f3 = st.columns([1, 1, 2])
 with f1:
@@ -633,17 +708,26 @@ if not selected_tickers:
             g_col1, g_col2 = st.columns([1, 2])
             with g_col1: render_allocation_charts(full_portfolio_df)
             with g_col2: render_global_monthly_pnl_colored(trade_log_df, df)
+        # [v8.4] 顯示庫存
+        st.divider()
+        render_inventory_management(full_portfolio_df, df, "overview")
     
     with t_swing:
         render_strategy_view(df, analysis_start, analysis_end, None, "波段", full_portfolio_df, trade_log_df, "swing")
+        # [v8.4] 顯示庫存
+        st.divider()
+        render_inventory_management(full_portfolio_df, df, "swing")
     
     with t_div:
         render_strategy_view(df, analysis_start, analysis_end, None, "存股", full_portfolio_df, trade_log_df, "dividend")
+        # [v8.4] 顯示庫存
+        st.divider()
+        render_inventory_management(full_portfolio_df, df, "div")
     
-    # [v8.3 AI] AI 教練分頁 (Gemini 2.5)
+    # [v8.4] AI 分頁 (不呼叫庫存顯示函數，達成隱藏效果)
     with t_ai:
         st.markdown("### 🤖 您的專屬 AI 投資顧問 (Powered by Gemini 2.5)")
-        st.info("AI 教練將分析您的「庫存結構」、「策略績效」與「交易紀錄」，提供客觀的診斷報告。")
+        st.info("AI 教練將依據您目前的庫存與歷史交易數據，提供客觀的診斷報告。")
         
         if st.button("🚀 開始 AI 診斷 (Gemini 2.5 Flash)", use_container_width=True):
             api_key_to_use = st.secrets.get("gemini_api_key", None)
@@ -654,7 +738,7 @@ if not selected_tickers:
                 total_summary, _, _ = analyze_period_advanced(df, min_date, date.today(), None, full_portfolio_df, trade_log_df, None)
                 data_prompt = prepare_data_for_ai(full_portfolio_df, total_summary)
                 
-                with st.spinner("AI 教練正在分析您的投資組合 (Gemini 2.5)..."):
+                with st.spinner("AI 教練正在分析您的投資組合 (嚴格事實模式)..."):
                     advice = ask_gemini_coach(api_key_to_use, data_prompt)
                     st.markdown(advice)
         
@@ -678,95 +762,7 @@ else:
                 if has_div:
                     with st.expander("💰 策略分析：存股", expanded=True):
                         render_strategy_view(df, analysis_start, analysis_end, [ticker], "存股", full_portfolio_df, trade_log_df, "dividend")
-
-st.divider()
-
-# --- 3. 庫存與新增交易區 ---
-st.markdown("### 📦 庫存管理與交易登錄")
-
-if not full_portfolio_df.empty:
-    stocks_pf = full_portfolio_df[full_portfolio_df['種類'] == '股票']
-    funds_pf = full_portfolio_df[full_portfolio_df['種類'] == '基金']
-    
-    if not stocks_pf.empty:
-        st.markdown("#### 📈 股票庫存")
-        s_cost = stocks_pf['總成本'].sum()
-        s_pl = stocks_pf['帳面損益'].sum()
-        s_div = stocks_pf['已領股息'].sum()
-        s_roi = ((s_pl + s_div) / s_cost * 100) if s_cost > 0 else 0
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("股票總現值", f"${stocks_pf['庫存現值'].sum():,.0f}")
-        s2.metric("股票總成本", f"${s_cost:,.0f}")
-        s3.metric("股票帳面損益", f"${s_pl:,.0f}", delta_color="normal")
-        s4.metric("股票總報酬率", f"{s_roi:.2f}%")
-    
-    if not funds_pf.empty:
-        st.markdown("#### 🛡️ 基金庫存")
-        f1, f2, f3, f4 = st.columns(4)
-        f_cost = funds_pf['總成本'].sum()
-        f_pl = funds_pf['帳面損益'].sum()
-        f_roi = (f_pl / f_cost * 100) if f_cost > 0 else 0
-        f1.metric("基金總現值", f"${funds_pf['庫存現值'].sum():,.0f}")
-        f2.metric("基金總投入", f"${f_cost:,.0f}")
-        f3.metric("基金帳面損益", f"${f_pl:,.0f}", delta_color="normal")
-        f4.metric("基金總報酬率", f"{f_roi:.2f}%")
-
-    st.write("") 
-
-    cols_show = ["代號", "種類", "佔比%", "庫存", "平均成本", "市價", "庫存現值", "帳面損益", "含息總報%", "策略"]
-    event = st.dataframe(
-        full_portfolio_df[cols_show], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="inventory_table"
-    )
-    
-    default_ticker = ""; default_strat = ["存股"]
-    if len(event.selection.rows) > 0:
-        selected_index = event.selection.rows[0]
-        selected_row = full_portfolio_df.iloc[selected_index]
-        default_ticker = selected_row['代號']
-        last_strat_str = df[df['Ticker'] == default_ticker].iloc[-1]['Strategy']
-        possible_strats = ["存股", "波段"]
-        for s in possible_strats:
-            if s in last_strat_str: default_strat = [s]; break
-        
-        st.divider()
-        st.markdown(f"#### 📂 {default_ticker} 歷史與操作")
-        target_hist = df[df['Ticker'] == default_ticker].sort_values('Date', ascending=False)
-        st.dataframe(target_hist[['Date', 'Action', 'Strategy', 'Price', 'Shares', 'Total_Amount']].head(5), use_container_width=True, hide_index=True)
-
-    col_input1, col_input2 = st.columns([2, 1])
-    with col_input1:
-        with st.form("bottom_entry_form", clear_on_submit=True):
-            st.markdown(f"**➕ 新增交易** {f'({default_ticker})' if default_ticker else ''}")
-            c1, c2, c3, c4 = st.columns(4)
-            with c1: d_date = st.date_input("日期"); d_ticker = st.text_input("代號", value=default_ticker).upper()
-            with c2: d_type = st.selectbox("種類", ["股票", "基金"]); d_action = st.selectbox("動作", ["買入", "賣出", "領息", "分割"])
-            with c3: d_strat = st.multiselect("策略", ["存股", "波段"], default=default_strat); d_price = st.number_input("單價", min_value=0.0, format="%.2f")
-            with c4: d_shares = st.number_input("股數", step=100.0); d_fee = st.number_input("手續費 (0自動算)", min_value=0)
-            c5, c6 = st.columns([3, 1])
-            with c5: d_total = st.number_input("總金額 (0自動算)", step=1000.0); d_note = st.text_input("備註")
-            with c6: st.write(""); st.write(""); submitted = st.form_submit_button("送出交易", use_container_width=True)
-            if submitted:
-                if not d_ticker: st.error("請輸入代號")
-                else:
-                    success = handle_transaction_submit(d_date, d_ticker, d_type, d_strat, d_action, d_price, d_shares, d_fee, d_total, d_note)
-                    if success: st.success(f"已儲存 {d_ticker}！"); st.cache_data.clear()
-    
-    with col_input2:
-        with st.form("bottom_fund_form", clear_on_submit=True):
-            st.markdown("**💵 更新基金淨值**")
-            f_ticker = st.text_input("基金代號").upper()
-            f_net_val = st.number_input("最新淨值", min_value=0.0, format="%.4f")
-            f_currency = st.selectbox("幣別", ["USD", "TWD"])
-            st.write("")
-            f_btn = st.form_submit_button("更新", use_container_width=True)
-            if f_btn:
-                try:
-                    cell = ws_funds.find(f_ticker)
-                    ws_funds.update_cell(cell.row, 2, f_net_val)
-                    ws_funds.update_cell(cell.row, 3, str(datetime.now().date()))
-                    ws_funds.update_cell(cell.row, 4, f_currency)
-                except:
-                    ws_funds.append_row([f_ticker, f_net_val, str(datetime.now().date()), f_currency])
-                st.success("更新成功"); st.cache_data.clear()
-else:
-    st.info("尚無資料，請先新增第一筆交易。")
+            
+            # 單一標的檢視時，通常還是需要編輯，所以保留庫存顯示
+            st.divider()
+            render_inventory_management(full_portfolio_df, df, f"ticker_{i}")
