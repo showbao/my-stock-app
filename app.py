@@ -1,5 +1,5 @@
-# Version: v7.2 (Fix Pie Chart Clipping, Single Pie for Tickers Only)
-# CTOSignature: Layout Pie Chart to Full Width, Content focus on Tickers, Removed Type Pie
+# Version: v8.2 (Streamlit Cloud Secrets Only)
+# CTOSignature: Removed Sidebar API Input, Auto-load 'gemini_api_key' from Cloud Secrets
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -9,20 +9,23 @@ from datetime import datetime, date, timedelta
 import numpy as np
 from scipy import optimize
 import altair as alt
+import google.generativeai as genai
 
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v7.2", layout="wide")
+st.set_page_config(page_title="投資戰情室 v8.2 (Cloud AI)", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
+        # 優先嘗試讀取 Streamlit Cloud 的 Secrets
         if "gcp_service_account" in st.secrets:
             creds_dict = st.secrets["gcp_service_account"]
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         else:
+            # 本機備援 (若有 secrets.json)
             creds = ServiceAccountCredentials.from_json_keyfile_name("secrets.json", scope)
             
         client = gspread.authorize(creds)
@@ -357,6 +360,62 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     years_df = pd.DataFrame(years_data)
     return summary, period_df, years_df
 
+# ==========================================
+# 3. AI 教練核心邏輯 (Secrets Only)
+# ==========================================
+def ask_gemini_coach(api_key, portfolio_summary_text):
+    """呼叫 Gemini API 進行投資診斷"""
+    if not api_key: return "⚠️ 未偵測到 API Key，請檢查 Secrets 設定。"
+        
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        prompt = f"""
+        你是一位專業、嚴格但富有洞察力的避險基金經理人與投資教練。
+        請根據以下使用者的投資組合數據進行分析，並給出具體的策略建議、風險警示與鼓勵。
+        請使用繁體中文回答，語氣專業且條理分明。
+
+        【投資組合數據摘要】
+        {portfolio_summary_text}
+
+        【你的分析重點】
+        1. **資產配置健康度**：檢查是否有過度集中（單一標的佔比過高）或過度分散的問題。
+        2. **策略執行效率**：
+           - 針對「波段」策略：檢視勝率與獲利能力。如果勝率低於 50%，請給予停損或選股建議。
+           - 針對「存股」策略：檢視是否有「賺了股息賠了價差」的狀況（例如 YoC 高但帳面大賠）。
+        3. **風險警示**：指出潛在的最大風險點。
+        4. **下一步行動建議**：給出 3 點具體可執行的建議。
+
+        請開始你的分析：
+        """
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"❌ AI 連線錯誤: {str(e)}\n請檢查 API Key 額度或網路狀態。"
+
+def prepare_data_for_ai(full_portfolio_df, summary_metrics):
+    if full_portfolio_df.empty: return "目前無庫存資料。"
+    top_holdings = full_portfolio_df.sort_values('庫存現值', ascending=False).head(5)
+    holdings_str = ""
+    for _, row in top_holdings.iterrows():
+        holdings_str += f"- {row['代號']} ({row['策略']}): 佔比 {row['佔比%']}%, 帳面損益 ${row['帳面損益']:,.0f}, 含息報酬 {row['含息總報%']}%\n"
+    
+    text_report = f"""
+    [整體績效]
+    - 總庫存現值: ${summary_metrics['庫存現值']:,.0f}
+    - 累積總損益: ${summary_metrics['累積總損益']:,.0f}
+    - 未實現損益: ${summary_metrics['未實現損益']:,.0f}
+    - 已實現損益: ${summary_metrics['已實現損益']:,.0f}
+    - 已領股息: ${summary_metrics['已領股息']:,.0f}
+    - 年化報酬率 (XIRR): {summary_metrics['XIRR%']:.2f}%
+    - 波段交易勝率: {summary_metrics['勝率%']:.1f}%
+    
+    [前五大持股風險曝險]
+    {holdings_str}
+    """
+    return text_report
+
 def handle_transaction_submit(date_in, ticker, type_display, strategy_list, action_display, price, shares, fee, total_amt, note):
     db_strat = ",".join(strategy_list)
     final_shares = shares; final_price = price; final_fee = fee; final_total = total_amt
@@ -386,66 +445,46 @@ def handle_transaction_submit(date_in, ticker, type_display, strategy_list, acti
 # 4. 儀表板與圖表
 # ==========================================
 def render_allocation_charts(full_portfolio_df):
-    """[v7.2 Fixed] 資產配置圓餅圖 - 單一甜甜圈圖解決截斷問題"""
+    """[v7.2 Fixed] 資產配置圓餅圖 - 單一甜甜圈圖"""
     if full_portfolio_df.empty: return
-    
     st.markdown("#### 🥧 資產配置 - 持股佔比")
-    
-    # 建立基礎圖表
-    base = alt.Chart(full_portfolio_df).encode(
-        theta=alt.Theta("庫存現值", stack=True) 
-    )
-    
-    # 繪製圓餅 (甜甜圈模式)，顏色依據「代號」
-    # outerRadius 設定為彈性或適中大小，讓 layout 自動處理
+    base = alt.Chart(full_portfolio_df).encode(theta=alt.Theta("庫存現值", stack=True))
     pie = base.mark_arc(outerRadius=120, innerRadius=60).encode(
         color=alt.Color("代號", title="投資標的", sort=alt.EncodingSortField(field="庫存現值", order="descending")),
         order=alt.Order("庫存現值", sort="descending"),
         tooltip=["代號", "庫存現值", "佔比%", "策略", "種類"]
     )
-    
-    # 使用 full container width 解決截斷問題
     st.altair_chart(pie, use_container_width=True)
 
 def render_global_monthly_pnl_colored(trade_log_df, df_records):
     """[v7.2 Kept] 累積已實現損益 (含股息) - 堆疊面積圖 + 時間軸修正"""
-    # 1. 處理已實現損益
     pnl_df = pd.DataFrame()
     if not trade_log_df.empty:
         pnl_df = trade_log_df[['Date', 'PnL', 'Type']].copy()
         pnl_df['Date'] = pd.to_datetime(pnl_df['Date'])
         pnl_df['Month'] = pnl_df['Date'].dt.strftime('%Y-%m')
         
-    # 2. 處理領息
     div_df = df_records[df_records['Action'] == '領息'][['Date', 'Total_Amount', 'Type']].copy()
     if not div_df.empty:
         div_df['Date'] = pd.to_datetime(div_df['Date'])
         div_df['Month'] = div_df['Date'].dt.strftime('%Y-%m')
         div_df = div_df.rename(columns={'Total_Amount': 'PnL'})
     
-    # 3. 合併並排序
     combined = pd.concat([pnl_df, div_df], ignore_index=True)
-    if combined.empty:
-        return
+    if combined.empty: return
         
     combined['Type'] = combined['Type'].fillna('股票') 
     combined = combined.sort_values('Month')
     
-    # 4. 樞紐運算
     grouped = combined.groupby(['Month', 'Type'])['PnL'].sum().reset_index()
     grouped['Date'] = pd.to_datetime(grouped['Month'])
     grouped = grouped.sort_values('Date')
-    
-    # 5. 計算累積
     grouped['Cumulative_PnL'] = grouped.groupby('Type')['PnL'].cumsum()
     
-    # 設定預設視野
     domain_end = datetime.now().date()
     domain_start = domain_end - timedelta(days=365)
 
-    # 6. 繪圖 (Stack Area)
     st.markdown("#### 🌊 累積已實現損益 (含股息) - 財富堆疊圖")
-    
     chart = alt.Chart(grouped).mark_area(opacity=0.7).encode(
         x=alt.X('Date:T', timeUnit='yearmonth', title='月份', 
                 scale=alt.Scale(domain=[pd.to_datetime(domain_start), pd.to_datetime(domain_end)])),
@@ -453,7 +492,6 @@ def render_global_monthly_pnl_colored(trade_log_df, df_records):
         color=alt.Color('Type:N', title='資產種類', scale=alt.Scale(domain=['股票', '基金'], range=['#1f77b4', '#ff7f0e'])),
         tooltip=[alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 'Type', 'Cumulative_PnL', 'PnL']
     ).properties(height=350).interactive()
-    
     st.altair_chart(chart, use_container_width=True)
 
 def render_metrics_cards(summary, mode):
@@ -467,7 +505,6 @@ def render_metrics_cards(summary, mode):
         k5.metric("年化報酬率", f"{summary['XIRR%']:.2f}%" if summary['XIRR%'] else "N/A")
         k6.metric("交易勝率", f"{summary['勝率%']:.1f}%")
         k7.empty(); k8.empty()
-        
     elif mode == "dividend":
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("累積總損益", f"${summary['累積總損益']:,.0f}")
@@ -479,8 +516,7 @@ def render_metrics_cards(summary, mode):
         k6.metric("成本殖利率 (YoC)", f"{summary['YoC%']:.2f}%")
         k7.metric("回本率", f"{summary['回本率%']:.1f}%")
         k8.empty()
-        
-    else: # general
+    else: 
         g1, g2, g3, g4, g5 = st.columns(5)
         g1.metric("累積總損益", f"${summary['累積總損益']:,.0f}")
         g2.metric("已領股息", f"${summary['已領股息']:,.0f}")
@@ -494,7 +530,6 @@ def render_chart_swing(trade_log_df, strategy_filter=None):
             swing_trades = trade_log_df[trade_log_df['Strategy'].str.contains(strategy_filter, na=False)]
         else:
             swing_trades = trade_log_df
-            
         if not swing_trades.empty:
             swing_trades = swing_trades.sort_values('Date')
             swing_trades['累積損益'] = swing_trades['PnL'].cumsum()
@@ -510,14 +545,12 @@ def render_chart_dividend_monthly(period_df):
     div_df = period_df[period_df['Action'] == '領息'].copy()
     if not div_df.empty:
         div_df['Date'] = pd.to_datetime(div_df['Date'])
-        
         chart = alt.Chart(div_df).mark_bar().encode(
             x=alt.X('Date:T', timeUnit='yearmonth', title='月份'), 
             y=alt.Y('Total_Amount:Q', title='股息金額'),
             color=alt.Color('Ticker:N', title='投資標的'),
             tooltip=[alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 'Ticker', 'Total_Amount']
         ).properties(height=350).interactive()
-        
         st.altair_chart(chart, use_container_width=True)
     else:
         st.info("區間內無領息紀錄")
@@ -535,15 +568,11 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
         elif "swing" in mode_name:
             st.markdown("##### 📈 交易損益曲線 & 落點")
             render_chart_swing(trade_log_df, strategy_filter)
-        
         if not years_df.empty:
             st.markdown("##### 📅 年度績效表")
             cols_to_show = []
-            if mode_name == "swing":
-                cols_to_show = ["年度", "已實現", "交易勝率", "年度投資報酬率"]
-            elif mode_name == "dividend":
-                cols_to_show = ["年度", "已領股息", "成本殖利率 (YoC)", "回本率"]
-            
+            if mode_name == "swing": cols_to_show = ["年度", "已實現", "交易勝率", "年度投資報酬率"]
+            elif mode_name == "dividend": cols_to_show = ["年度", "已領股息", "成本殖利率 (YoC)", "回本率"]
             final_cols = [c for c in cols_to_show if c in years_df.columns]
             st.dataframe(years_df[final_cols], use_container_width=True, hide_index=True)
     else:
@@ -552,7 +581,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v7.2")
+st.title("📊 投資戰情室 v8.2 (Cloud AI)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -578,34 +607,41 @@ st.divider()
 
 # 主呈現區 (全寬度)
 if not selected_tickers:
-    t_all, t_swing, t_div = st.tabs(["🌍 全總覽", "⚡ 波段", "💰 存股"])
+    t_all, t_swing, t_div, t_ai = st.tabs(["🌍 全總覽", "⚡ 波段", "💰 存股", "🤖 AI 教練"])
     
-    # 分頁 1: 全總覽
     with t_all:
         total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
         if total_summary:
             render_metrics_cards(total_summary, "general")
             st.write("")
-            
-            # [v7.2 Fix] 資產配置圖與累積損益圖左右分佈
-            # 將圓餅圖獨立放在較寬的 column，或調整比例
             g_col1, g_col2 = st.columns([1, 2])
-            
-            with g_col1:
-                # [v7.2 Update] 單一圓餅圖，不被截斷
-                render_allocation_charts(full_portfolio_df)
-                
-            with g_col2:
-                # 累積堆疊河流圖
-                render_global_monthly_pnl_colored(trade_log_df, df)
+            with g_col1: render_allocation_charts(full_portfolio_df)
+            with g_col2: render_global_monthly_pnl_colored(trade_log_df, df)
     
-    # 分頁 2: 波段
     with t_swing:
         render_strategy_view(df, analysis_start, analysis_end, None, "波段", full_portfolio_df, trade_log_df, "swing")
-        
-    # 分頁 3: 存股
+    
     with t_div:
         render_strategy_view(df, analysis_start, analysis_end, None, "存股", full_portfolio_df, trade_log_df, "dividend")
+    
+    # [v8.2 Cloud AI] 分頁 4: AI 教練 (自動讀取 Secrets)
+    with t_ai:
+        st.markdown("### 🤖 您的專屬 AI 投資顧問")
+        st.info("AI 教練將分析您的「庫存結構」、「策略績效」與「交易紀錄」，提供客觀的診斷報告。")
+        
+        if st.button("🚀 開始 AI 診斷 (Call Gemini)", use_container_width=True):
+            # 優先檢查 Secrets 是否有 Key
+            api_key_to_use = st.secrets.get("gemini_api_key", None)
+            
+            if not api_key_to_use:
+                st.error("❌ 未偵測到 API Key！請確認 Streamlit Cloud 後台 Secrets 是否已設定 `gemini_api_key`。")
+            else:
+                total_summary, _, _ = analyze_period_advanced(df, min_date, date.today(), None, full_portfolio_df, trade_log_df, None)
+                data_prompt = prepare_data_for_ai(full_portfolio_df, total_summary)
+                
+                with st.spinner("AI 教練正在分析您的投資組合..."):
+                    advice = ask_gemini_coach(api_key_to_use, data_prompt)
+                    st.markdown(advice)
         
 else:
     ticker_tabs = st.tabs([f"🔍 {t}" for t in selected_tickers])
@@ -643,7 +679,6 @@ if not full_portfolio_df.empty:
         s_pl = stocks_pf['帳面損益'].sum()
         s_div = stocks_pf['已領股息'].sum()
         s_roi = ((s_pl + s_div) / s_cost * 100) if s_cost > 0 else 0
-        
         s1, s2, s3, s4 = st.columns(4)
         s1.metric("股票總現值", f"${stocks_pf['庫存現值'].sum():,.0f}")
         s2.metric("股票總成本", f"${s_cost:,.0f}")
