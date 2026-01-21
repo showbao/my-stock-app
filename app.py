@@ -1,5 +1,5 @@
-# Version: v8.2 (Streamlit Cloud Secrets Only)
-# CTOSignature: Removed Sidebar API Input, Auto-load 'gemini_api_key' from Cloud Secrets
+# Version: v8.3 (Upgraded to Gemini 2.5 Flash)
+# CTOSignature: Model updated to 'gemini-2.5-flash', Added 'Model Checker' in Sidebar
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -14,18 +14,16 @@ import google.generativeai as genai
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v8.2 (Cloud AI)", layout="wide")
+st.set_page_config(page_title="投資戰情室 v8.3 (Gemini 2.5)", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # 優先嘗試讀取 Streamlit Cloud 的 Secrets
         if "gcp_service_account" in st.secrets:
             creds_dict = st.secrets["gcp_service_account"]
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         else:
-            # 本機備援 (若有 secrets.json)
             creds = ServiceAccountCredentials.from_json_keyfile_name("secrets.json", scope)
             
         client = gspread.authorize(creds)
@@ -369,7 +367,9 @@ def ask_gemini_coach(api_key, portfolio_summary_text):
         
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # [v8.3 Update] 使用最新的 Gemini 2.5 Flash 模型
+        # 若需要更強推理，可改為 'gemini-2.5-pro'
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
         prompt = f"""
         你是一位專業、嚴格但富有洞察力的避險基金經理人與投資教練。
@@ -392,7 +392,7 @@ def ask_gemini_coach(api_key, portfolio_summary_text):
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"❌ AI 連線錯誤: {str(e)}\n請檢查 API Key 額度或網路狀態。"
+        return f"❌ AI 連線錯誤: {str(e)}\n請檢查 API Key 額度或確認您所在的區域是否支援 Gemini 2.5。"
 
 def prepare_data_for_ai(full_portfolio_df, summary_metrics):
     if full_portfolio_df.empty: return "目前無庫存資料。"
@@ -581,7 +581,7 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v8.2 (Cloud AI)")
+st.title("📊 投資戰情室 v8.3 (Gemini 2.5)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty:
@@ -590,6 +590,22 @@ if df.empty:
 
 all_tickers = df['Ticker'].unique().tolist()
 full_portfolio_df, trade_log_df = calculate_portfolio(df, df_funds, usd_rate)
+
+# [v8.3 Sidebar] 模型檢查工具
+with st.sidebar:
+    st.markdown("### 🤖 模型狀態檢查")
+    if st.button("列出可用模型"):
+        api_key = st.secrets.get("gemini_api_key", None)
+        if not api_key:
+            st.error("Secrets 中找不到 gemini_api_key")
+        else:
+            try:
+                genai.configure(api_key=api_key)
+                models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                st.success(f"連線成功！可用模型：")
+                st.json(models)
+            except Exception as e:
+                st.error(f"查詢失敗：{str(e)}")
 
 # [v7.1 Layout] 篩選列水平置頂
 st.markdown("#### 🔍 篩選條件")
@@ -624,13 +640,12 @@ if not selected_tickers:
     with t_div:
         render_strategy_view(df, analysis_start, analysis_end, None, "存股", full_portfolio_df, trade_log_df, "dividend")
     
-    # [v8.2 Cloud AI] 分頁 4: AI 教練 (自動讀取 Secrets)
+    # [v8.3 AI] AI 教練分頁 (Gemini 2.5)
     with t_ai:
-        st.markdown("### 🤖 您的專屬 AI 投資顧問")
+        st.markdown("### 🤖 您的專屬 AI 投資顧問 (Powered by Gemini 2.5)")
         st.info("AI 教練將分析您的「庫存結構」、「策略績效」與「交易紀錄」，提供客觀的診斷報告。")
         
-        if st.button("🚀 開始 AI 診斷 (Call Gemini)", use_container_width=True):
-            # 優先檢查 Secrets 是否有 Key
+        if st.button("🚀 開始 AI 診斷 (Gemini 2.5 Flash)", use_container_width=True):
             api_key_to_use = st.secrets.get("gemini_api_key", None)
             
             if not api_key_to_use:
@@ -639,7 +654,7 @@ if not selected_tickers:
                 total_summary, _, _ = analyze_period_advanced(df, min_date, date.today(), None, full_portfolio_df, trade_log_df, None)
                 data_prompt = prepare_data_for_ai(full_portfolio_df, total_summary)
                 
-                with st.spinner("AI 教練正在分析您的投資組合..."):
+                with st.spinner("AI 教練正在分析您的投資組合 (Gemini 2.5)..."):
                     advice = ask_gemini_coach(api_key_to_use, data_prompt)
                     st.markdown(advice)
         
