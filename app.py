@@ -1,5 +1,5 @@
-# Version: v8.5 (Based on v8.4 + Dialog + Bidirectional Swing Analysis)
-# CTOSignature: v8.4 Base, Added @st.dialog for Cash, Buy/Sell +/-10 days Window, Modular AI
+# Version: v8.8 (Final NameError Fix + Robust Initialization)
+# CTOSignature: Initialized 'total_summary' to None globally, added safety checks before rendering metrics.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -14,7 +14,7 @@ import google.generativeai as genai
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v8.5", layout="wide")
+st.set_page_config(page_title="投資戰情室 v8.8", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -30,8 +30,7 @@ def connect_google_sheet():
         sheet = client.open("Investment_Tracker")
         return sheet
     except Exception as e:
-        st.error(f"連線失敗！請檢查 Streamlit Secrets 設定。\n錯誤訊息: {e}")
-        st.stop()
+        return None # Return None explicitly to handle later
 
 sh = connect_google_sheet()
 if sh:
@@ -39,8 +38,11 @@ if sh:
         ws_records = sh.worksheet("Records")
         ws_funds = sh.worksheet("Fund_Updates")
     except:
-        st.error("❌ 找不到工作表。")
+        st.error("❌ 找不到工作表 'Records' 或 'Fund_Updates'。請確認 Google Sheet名稱正確。")
         st.stop()
+else:
+    st.error("❌ Google Sheet 連線失敗。請檢查 Streamlit Secrets 設定是否正確 (invalid_grant 或 API 未啟用)。")
+    st.stop()
 
 # ==========================================
 # 2. 核心邏輯函數
@@ -72,50 +74,32 @@ def get_stock_data(ticker):
 
 @st.cache_data(ttl=86400) 
 def get_historical_price_window(ticker, trade_date, window_days=10):
-    """
-    [v8.5 New] 抓取交易日 前10天 ~ 後10天 的極值，用於判斷買賣點位
-    """
     try:
         t_date = pd.to_datetime(trade_date)
-        # 抓取範圍稍微寬一點 (前後15天) 以確保涵蓋交易日視窗
         start_d = t_date - timedelta(days=window_days + 5)
         end_d = t_date + timedelta(days=window_days + 5)
-        
         stock = yf.Ticker(ticker)
         hist = stock.history(start=start_d.strftime('%Y-%m-%d'), end=end_d.strftime('%Y-%m-%d'), auto_adjust=True)
-        
         if hist.empty: return None
-        
-        # 篩選視窗內的數據
         mask_window = (hist.index >= (t_date - timedelta(days=window_days))) & (hist.index <= (t_date + timedelta(days=window_days)))
         window_df = hist.loc[mask_window]
-        
         if window_df.empty: return None
-        
         return {
             "window_high": window_df['High'].max(),
             "window_low": window_df['Low'].min(),
-            "price_at_trade": window_df.loc[window_df.index.normalize() == t_date.normalize()]['Close'].mean() 
+            "price_at_trade": window_df.loc[window_df.index.normalize() == t_date.normalize()]['Close'].mean()
         }
-    except:
-        return None
+    except: return None
 
 def normalize_data(df):
     if df.empty: return df
     act_map = {'Buy': '買入', 'Sell': '賣出', 'Dividend': '領息', 'Split': '分割', 'Buy (Buy)': '買入', 'Sell (Sell)': '賣出'}
-    strat_map = {
-        'Dividend': '存股', 'Swing': '波段', 'Swing Short': '波段', 'Swing Long': '波段',
-        '波段-短期': '波段', '波段-長期': '波段', '波動': '波段', '波動-短期': '波段', '波動-長期': '波段'
-    }
+    strat_map = {'Dividend': '存股', 'Swing': '波段', 'Swing Short': '波段', 'Swing Long': '波段', '波段-短期': '波段', '波段-長期': '波段', '波動': '波段', '波動-短期': '波段', '波動-長期': '波段'}
     type_map = {'Stock': '股票', 'Fund': '基金'}
-
-    if 'Action' in df.columns:
-        df['Action'] = df['Action'].replace(act_map)
+    if 'Action' in df.columns: df['Action'] = df['Action'].replace(act_map)
     if 'Strategy' in df.columns:
-        for old, new in strat_map.items():
-            df['Strategy'] = df['Strategy'].str.replace(old, new, regex=False)
-    if 'Type' in df.columns:
-        df['Type'] = df['Type'].replace(type_map)
+        for old, new in strat_map.items(): df['Strategy'] = df['Strategy'].str.replace(old, new, regex=False)
+    if 'Type' in df.columns: df['Type'] = df['Type'].replace(type_map)
     return df
 
 def load_data():
@@ -132,13 +116,10 @@ def load_data():
     except: df_funds = pd.DataFrame()
     
     if df.empty: return df, df_funds, 32.0
-    
     numeric_cols = ['Price', 'Shares', 'Fee', 'Total_Amount']
     for col in numeric_cols:
-        if df[col].dtype == object:
-             df[col] = df[col].astype(str).str.replace(',','').str.replace('$','')
+        if df[col].dtype == object: df[col] = df[col].astype(str).str.replace(',','').str.replace('$','')
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    
     df['Date'] = pd.to_datetime(df['Date']).dt.date
     df = normalize_data(df)
     current_usd_rate = get_usd_twd_rate()
@@ -153,37 +134,28 @@ def xirr(transactions):
         if rate <= -1.0: return float('inf')
         d0 = dates[0]
         return sum([a / (1.0 + rate)**((d - d0).days / 365.0) for a, d in zip(amounts, dates)])
-    try:
-        return optimize.newton(lambda r: xnpv(r, amounts, dates), 0.1)
-    except:
-        return None
+    try: return optimize.newton(lambda r: xnpv(r, amounts, dates), 0.1)
+    except: return None
 
 def calculate_portfolio(df, df_funds, current_usd_rate):
     portfolio = {}
     trade_log = [] 
     df = df.sort_values('Date')
-    
     for _, row in df.iterrows():
         ticker = row['Ticker']; action = row['Action']; qty = row['Shares']
         amount = row['Total_Amount']; date_txn = row['Date']
         typ = row['Type']; strat = str(row['Strategy'])
-        
         if ticker not in portfolio:
             portfolio[ticker] = {'shares': 0, 'total_cost': 0, 'realized_pl': 0, 'dividend_collected': 0, 'type': typ, 'strategy': strat}
-        p = portfolio[ticker]
-        p['strategy'] = strat 
-
-        if action == '買入':
-            p['shares'] += qty; p['total_cost'] += amount
+        p = portfolio[ticker]; p['strategy'] = strat 
+        if action == '買入': p['shares'] += qty; p['total_cost'] += amount
         elif action == '賣出':
             if p['shares'] > 0:
                 pct_sold = qty / p['shares']
                 cost_of_sold_shares = p['total_cost'] * pct_sold
                 pnl = amount - cost_of_sold_shares
                 p['realized_pl'] += pnl; p['total_cost'] -= cost_of_sold_shares; p['shares'] -= qty
-                # [v8.5] Record SellPrice for backtesting
-                sell_price = (amount / qty) if qty > 0 else 0
-                trade_log.append({'Date': date_txn, 'Ticker': ticker, 'Strategy': p['strategy'], 'Type': p['type'], 'PnL': pnl, 'SellAmount': amount, 'SellPrice': sell_price})
+                trade_log.append({'Date': date_txn, 'Ticker': ticker, 'Strategy': p['strategy'], 'Type': p['type'], 'PnL': pnl, 'SellAmount': amount, 'SellPrice': (amount/qty) if qty>0 else 0})
                 if p['shares'] <= 0.001: p['shares'] = 0; p['total_cost'] = 0
         elif action == '領息': p['dividend_collected'] += amount
         elif action == '分割': p['shares'] += qty
@@ -192,8 +164,7 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
     for ticker, data in portfolio.items():
         current_price = 0; market_value = 0
         if data['shares'] > 0.001:
-            if data['type'] == '股票':
-                current_price, _ = get_stock_data(ticker)
+            if data['type'] == '股票': current_price, _ = get_stock_data(ticker)
             elif data['type'] == '基金':
                 if not df_funds.empty and ticker in df_funds['Ticker'].values:
                     fund_row = df_funds[df_funds['Ticker'] == ticker].iloc[0]
@@ -201,19 +172,17 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
                     currency = 'USD'
                     if 'Currency' in df_funds.columns: currency = fund_row['Currency']
                     current_price = net_val if currency == 'TWD' else net_val * current_usd_rate
-            
             market_value = current_price * data['shares']
             avg_cost = data['total_cost'] / data['shares']
             unrealized_pl = market_value - data['total_cost']
             total_gain = unrealized_pl + data['dividend_collected']
             roi_total = (total_gain / data['total_cost'] * 100) if data['total_cost'] > 0 else 0
-            
             results.append({
                 "代號": ticker, "種類": data['type'], "策略": data['strategy'], "庫存": data['shares'], "平均成本": round(avg_cost, 2),
                 "市價": round(current_price, 2), "庫存現值": round(market_value, 0), "帳面損益": round(unrealized_pl, 0),
-                "已領股息": round(data['dividend_collected'], 0), "含息總報%": round(roi_total, 2), "總成本": round(data['total_cost'], 0), "成本殖利率%": ((data['dividend_collected']/data['total_cost']*100) if data['total_cost']>0 else 0)
+                "已領股息": round(data['dividend_collected'], 0), "含息總報%": round(roi_total, 2), "總成本": round(data['total_cost'], 0),
+                "成本殖利率%": ((data['dividend_collected']/data['total_cost']*100) if data['total_cost']>0 else 0)
             })
-    
     pf_df = pd.DataFrame(results)
     if not pf_df.empty:
         total_mv = pf_df['庫存現值'].sum()
@@ -290,7 +259,7 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     return summary, period_df, pd.DataFrame()
 
 # ==========================================
-# 3. AI 教練核心邏輯 (Modular + Fact-Based)
+# 3. AI 教練核心邏輯
 # ==========================================
 def ask_gemini_coach(api_key, prompt_text):
     if not api_key: return "⚠️ 未偵測到 API Key，請檢查 Secrets 設定。"
@@ -301,23 +270,19 @@ def ask_gemini_coach(api_key, prompt_text):
         return response.text
     except Exception as e: return f"❌ AI 連線錯誤: {str(e)}"
 
-# --- Module A: Global Analysis (Dialog) ---
 @st.dialog("🌍 輸入現金餘額以進行全域分析")
 def dialog_global_analysis(full_portfolio_df, summary_metrics):
     cash_balance = st.number_input("請輸入目前帳戶閒置現金 (TWD)", min_value=0, value=0, step=10000)
     st.caption("輸入現金能讓 AI 協助判斷資金效率與加碼彈性。")
-    
     if st.button("開始全域診斷", use_container_width=True):
         api_key = st.secrets.get("gemini_api_key", None)
         if not api_key: st.error("無 API Key"); return
-
         total_assets = summary_metrics['庫存現值'] + cash_balance
         cash_ratio = (cash_balance / total_assets * 100) if total_assets > 0 else 0
         top_holdings = full_portfolio_df.sort_values('庫存現值', ascending=False).head(5)
         holdings_str = ""
         for _, row in top_holdings.iterrows():
             holdings_str += f"- {row['代號']} ({row['種類']}): 佔比 {row['佔比%']}%\n"
-
         prompt = f"""
         你是一位專業的資產配置顧問。請依據以下【事實數據】進行全域診斷。
         【嚴格指令】1. 絕對依據提供的數據。2. 使用繁體中文。
@@ -334,79 +299,92 @@ def dialog_global_analysis(full_portfolio_df, summary_metrics):
             advice = ask_gemini_coach(api_key, prompt)
             st.session_state['ai_result'] = advice; st.rerun()
 
-# --- Module B: Swing Analysis (Bidirectional Window) ---
 def run_swing_analysis_advanced(df_raw, trade_log_df):
     api_key = st.secrets.get("gemini_api_key", None)
     if not api_key: st.error("無 API Key"); return
-
-    # 撈取最近 5 筆波段買入 & 賣出
-    buys = df_raw[(df_raw['Strategy'].str.contains('波段', na=False)) & (df_raw['Action'] == '買入')].tail(5)
+    buys = df_raw[(df_raw['Strategy'].str.contains('波段', na=False)) & (df_raw['Action'] == '買入')].tail(5) 
     sells = trade_log_df[trade_log_df['Strategy'].str.contains('波段', na=False)].tail(5)
-
-    analysis_log = "[買入點位回測 (T±10日)]\n"
-    with st.status("正在進行雙向股價回測...", expanded=True) as status:
-        # Buy Analysis
+    analysis_log = "[買入點位回測 - Entry Analysis]\n"
+    with st.status("正在進行前後 10 日股價回測...", expanded=True) as status:
         for _, row in buys.iterrows():
             ticker = row['Ticker']; buy_date = row['Date']; buy_price = row['Price']
             context = get_historical_price_window(ticker, buy_date)
             if context:
                 win_low = context['window_low']
-                # 買價距離區間最低價的 %
-                dist_low = ((buy_price - win_low) / win_low * 100)
-                status.write(f"回測買入 {ticker}: 買價 {buy_price}, 區間最低 {win_low:.2f} (距離 +{dist_low:.1f}%)")
-                analysis_log += f"- {ticker} 買入 {buy_date}: 買價 {buy_price}, 視窗最低價 {win_low:.2f} (距離 +{dist_low:.1f}%)\n"
-        
-        analysis_log += "\n[賣出點位回測 (T±10日)]\n"
-        # Sell Analysis
+                dist_from_low = ((buy_price - win_low) / win_low * 100)
+                status.write(f"回測買入 {ticker}: 買價 {buy_price}, 區間最低 {win_low:.2f} (距離 +{dist_from_low:.1f}%)")
+                analysis_log += f"- {ticker} 買入 {buy_date}: 買價 {buy_price}, 視窗(±10天)最低價 {win_low:.2f}, 買點距離最低點僅 +{dist_from_low:.1f}%\n"
+        analysis_log += "\n[賣出點位回測 - Exit Analysis]\n"
         for _, row in sells.iterrows():
             ticker = row['Ticker']; sell_date = row['Date']; sell_price = row['SellPrice']
             context = get_historical_price_window(ticker, sell_date)
             if context:
                 win_high = context['window_high']
-                # 賣價距離區間最高價的 % (賣飛程度)
-                missed = ((win_high - sell_price) / sell_price * 100)
-                status.write(f"回測賣出 {ticker}: 賣價 {sell_price:.2f}, 區間最高 {win_high:.2f} (賣飛 -{missed:.1f}%)")
-                analysis_log += f"- {ticker} 賣出 {sell_date}: 賣價 {sell_price:.2f}, 視窗最高價 {win_high:.2f} (賣飛 {missed:.1f}%), 該筆損益 ${row['PnL']:.0f}\n"
-        
+                missed_gain = ((win_high - sell_price) / sell_price * 100)
+                status.write(f"回測賣出 {ticker}: 賣價 {sell_price:.2f}, 區間最高 {win_high:.2f} (賣飛 -{missed_gain:.1f}%)")
+                analysis_log += f"- {ticker} 賣出 {sell_date}: 賣價 {sell_price:.2f}, 視窗(±10天)最高價 {win_high:.2f}, 賣飛幅度 {missed_gain:.1f}%, 該筆損益 ${row['PnL']:.0f}\n"
         status.update(label="回測完成！正在生成 AI 報告...", state="complete", expanded=False)
-
     prompt = f"""
-    你是一位嚴格的波段交易教練。請依據「交易日 前後10天」的雙向回測數據，點評我的擇時能力。
-    【波段交易回測數據】{analysis_log}
+    你是一位嚴格的波段交易教練。我剛完成了「交易日 前後10天」的雙向股價回測，請分析我的擇時能力。
+    【波段交易回測數據 (最近交易)】{analysis_log}
     【分析重點】
-    1. **買點精準度**：若買價距離最低點 < 5%，請稱讚「精準抄底」；若差距大，提醒「追高風險」。
-    2. **賣點精準度**：若賣價距離最高點 < 5%，請稱讚「賣得漂亮」；若賣飛幅度 > 10%，分析是否有「太早獲利了結」或「恐慌殺出」。
-    3. **總結建議**：針對數據給予改進方向。
+    1. **買點精準度 (Entry)**：
+       - 若買價距離最低點很近 (<3%)，請稱讚「抄底精準」。
+       - 若距離很遠，請提醒「追高風險」。
+    2. **賣點精準度 (Exit)**：
+       - 若賣價距離最高點很近，請稱讚「賣得漂亮」。
+       - 若賣飛幅度大 (>10%)，請分析是否有「太早獲利了結」的心態。
+    3. **總結建議**：針對買賣操作給予一個具體的改進方向。
     """
     return ask_gemini_coach(api_key, prompt)
 
-# --- Module C: Dividend Analysis ---
 def run_dividend_analysis(full_portfolio_df):
     api_key = st.secrets.get("gemini_api_key", None)
     if not api_key: st.error("無 API Key"); return
-    
     div_stocks = full_portfolio_df[full_portfolio_df['策略'].str.contains('存股', na=False)]
     if div_stocks.empty: return "無存股庫存。"
-    
     stocks_str = ""
     for _, row in div_stocks.iterrows():
-        stocks_str += f"- {row['代號']}: 總成本 ${row['總成本']:,.0f}, 已領股息 ${row['已領股息']:,.0f}, 帳面損益 ${row['帳面損益']:,.0f}, 成本殖利率(YoC) {row['成本殖利率%']}%\n"
-    
+        yoc = row['成本殖利率%']
+        stocks_str += f"- {row['代號']}: 總成本 ${row['總成本']:,.0f}, 已領股息 ${row['已領股息']:,.0f}, 帳面損益 ${row['帳面損益']:,.0f}, YoC {yoc}%\n"
     prompt = f"""
-    你是一位價值投資專家。請依據以下數據進行存股健檢。
+    你是一位價值投資專家。請檢視以下的存股組合健康度。
     【存股庫存數據】{stocks_str}
     【分析重點】
-    1. **高殖利率陷阱偵測**：是否有「賺了股息、賠了價差」的股票？(已領股息 < 帳面虧損)。
+    1. **高殖利率陷阱偵測**：是否有「賺了股息、賠了價差」的股票？
     2. **持有信心**：針對 YoC 高的標的給予鼓勵。
     3. **複利建議**：簡述再投入的重要性。
     """
     return ask_gemini_coach(api_key, prompt)
 
+def prepare_data_for_ai(full_portfolio_df, summary_metrics, swing_metrics):
+    if full_portfolio_df.empty: return "目前無庫存資料。"
+    top_holdings = full_portfolio_df.sort_values('庫存現值', ascending=False).head(5)
+    holdings_str = ""
+    for _, row in top_holdings.iterrows():
+        holdings_str += f"- 代號 {row['代號']} ({row['策略']}): 市值 ${row['庫存現值']:,.0f} (佔比 {row['佔比%']}%), 帳面損益 ${row['帳面損益']:,.0f}, 含息報酬率 {row['含息總報%']}%\n"
+    swing_win_rate = f"{swing_metrics['勝率%']:.1f}%" if swing_metrics else "無資料"
+    swing_pnl = f"${swing_metrics['已實現損益']:,.0f}" if swing_metrics else "0"
+    text_report = f"""
+    [整體帳戶摘要]
+    - 總庫存現值: ${summary_metrics['庫存現值']:,.0f}
+    - 累積總損益: ${summary_metrics['累積總損益']:,.0f}
+    [波段策略專屬績效]
+    - 波段交易勝率: {swing_win_rate}
+    - 波段已實現獲利: {swing_pnl}
+    [前五大重倉持股]
+    {holdings_str}
+    """
+    return text_report
+
 def handle_transaction_submit(date_in, ticker, type_display, strategy_list, action_display, price, shares, fee, total_amt, note):
     db_strat = ",".join(strategy_list)
     final_shares = shares; final_price = price; final_fee = fee; final_total = total_amt
-    if final_fee == 0 and action_display in ["買入", "賣出"]: final_fee = int(price * shares * 0.001425)
-    if action_display == "領息": final_shares = 0; final_price = 0
+    if final_fee == 0 and action_display in ["買入", "賣出"]:
+        final_fee = int(price * shares * 0.001425)
+    if action_display == "領息":
+        final_shares = 0; final_price = 0
+        if final_total == 0: st.error("領息金額不能為 0"); return False
     elif action_display == "分割": final_total = 0; final_price = 0
     else:
         if final_total == 0:
@@ -415,6 +393,7 @@ def handle_transaction_submit(date_in, ticker, type_display, strategy_list, acti
             elif action_display == "賣出":
                 tax_rate = 0.003; tax = int(basic_amt * tax_rate)
                 final_total = basic_amt - final_fee - tax
+                if tax > 0: note = f"{note} (稅 ${tax})".strip()
     new_row = [str(date_in), ticker, type_display, db_strat, action_display, final_price, final_shares, final_fee, final_total, note]
     ws_records.append_row(new_row); return True
 
@@ -495,7 +474,7 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v8.5 (Pro AI)")
+st.title("📊 投資戰情室 v8.8 (Pro AI)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
@@ -513,11 +492,13 @@ with f3: selected_tickers = st.multiselect("投資標的", all_tickers, default=
 
 st.divider()
 
-total_summary = None # Init var
+# 初始化變數以避免 NameError
+total_summary = None
+
 if not selected_tickers:
     t_all, t_swing, t_div, t_ai = st.tabs(["🌍 全總覽", "⚡ 波段", "💰 存股", "🤖 AI 教練"])
     
-    # Pre-calc total summary safely
+    # 預先計算總表
     if not df.empty:
         total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
 
@@ -539,10 +520,11 @@ if not selected_tickers:
     
     with t_ai:
         st.markdown("### 🤖 您的專屬 AI 投資顧問")
-        st.info("請選擇分析面向，AI 將依據您的數據進行運算。")
+        st.info("請選擇您想進行的分析面向。AI 將根據您的選擇，載入不同的數據模型進行運算。")
         c_ai_1, c_ai_2, c_ai_3 = st.columns(3)
         
         with c_ai_1:
+            # 確保有數據可傳遞，若無則重新計算全區間
             total_sum_ai = total_summary if total_summary else analyze_period_advanced(df, min_date, date.today(), None, full_portfolio_df, trade_log_df, None)[0]
             if st.button("🌍 全域總覽診斷", use_container_width=True):
                 dialog_global_analysis(full_portfolio_df, total_sum_ai)
