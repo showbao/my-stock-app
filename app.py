@@ -1,5 +1,5 @@
-# Version: v9.1 (Timezone Mismatch Fix + Ticker Auto-Fix + Formatting)
-# CTOSignature: Fixed 'Asia/Taipei' vs Naive comparison error by stripping timezones.
+# Version: v9.2 (Safety Filter Fix + Timezone Fix + Auto-Ticker)
+# CTOSignature: Added safety_settings to 'BLOCK_NONE' to allow strict AI critiques. Kept v9.1 timezone fixes.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -14,7 +14,7 @@ import google.generativeai as genai
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v9.1", layout="wide")
+st.set_page_config(page_title="投資戰情室 v9.2", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -96,7 +96,7 @@ def get_stock_data(ticker):
         return 0.0, 0.0
     except: return 0.0, 0.0
 
-# [v9.1 FIX] 加入時區移除邏輯 (tz_localize(None))
+# [v9.1 Logic] 確保時區移除，避免 Invalid comparison
 def get_historical_price_window(ticker, trade_date, window_days=10):
     try:
         # 1. 確保交易日期是沒有時區的 (Naive)
@@ -115,7 +115,7 @@ def get_historical_price_window(ticker, trade_date, window_days=10):
         if hist.empty:
             return None, f"找不到數據 ({real_ticker})"
             
-        # [CRITICAL FIX] 4. 強制移除 yfinance 回傳的時區資訊，避免與 t_date 衝突
+        # 4. 強制移除 yfinance 回傳的時區資訊
         if hist.index.tz is not None:
             hist.index = hist.index.tz_localize(None)
             
@@ -304,16 +304,26 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     return summary, period_df, pd.DataFrame()
 
 # ==========================================
-# 3. AI 教練核心邏輯
+# 3. AI 教練核心邏輯 (v9.2 Safety Filter Fix)
 # ==========================================
 def ask_gemini_coach(api_key, prompt_text):
     if not api_key: return "⚠️ 未偵測到 API Key，請檢查 Secrets 設定。"
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.5-flash')
-        response = model.generate_content(prompt_text)
+        
+        # [v9.2 New] 解除安全封印，允許 AI 嚴格批評與談論虧損
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        
+        response = model.generate_content(prompt_text, safety_settings=safety_settings)
         return response.text
-    except Exception as e: return f"❌ AI 連線錯誤: {str(e)}"
+    except Exception as e:
+        return f"❌ AI 連線錯誤: {str(e)}"
 
 @st.dialog("🌍 輸入現金餘額以進行全域分析")
 def dialog_global_analysis(full_portfolio_df, summary_metrics):
@@ -658,7 +668,7 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v9.1 (Pro AI)")
+st.title("📊 投資戰情室 v9.2 (Pro AI)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
