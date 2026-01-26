@@ -1,5 +1,5 @@
-# Version: v8.9.1 (Formatting Fix + Ticker Suffix Auto-Fix + NameError Guard)
-# CTOSignature: Added AI Markdown styling instructions (:red[]), Auto-append .TW for yfinance, Robust variable init.
+# Version: v9.0 (Swing Fix + Debug Mode + Ticker Auto-Correction)
+# CTOSignature: Implemented robust .TW/.TWO auto-detection, Removed caching for reliable fetching, Added verbose debug logs.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -15,7 +15,7 @@ import time
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v8.9.1", layout="wide")
+st.set_page_config(page_title="投資戰情室 v9.0", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -58,22 +58,40 @@ def get_usd_twd_rate():
         return 32.0
     except: return 32.0
 
+# [v9.0 New] 獨立的代號修復邏輯
+def fix_ticker_suffix(ticker):
+    """
+    智慧判斷台股代號：
+    1. 若已有後綴 (如 .TW)，直接回傳。
+    2. 若無後綴且為數字，先試 .TW (上市)，再試 .TWO (上櫃)。
+    """
+    ticker = str(ticker).strip().upper()
+    if not ticker.isdigit(): 
+        return ticker # 美股或其他
+    
+    # 嘗試上市
+    try_tw = f"{ticker}.TW"
+    stock = yf.Ticker(try_tw)
+    # 快速檢查是否有資料 (抓一天)
+    if not stock.history(period="1d").empty:
+        return try_tw
+        
+    # 嘗試上櫃
+    try_two = f"{ticker}.TWO"
+    stock = yf.Ticker(try_two)
+    if not stock.history(period="1d").empty:
+        return try_two
+        
+    return ticker # 真的找不到，回傳原始值
+
 @st.cache_data(ttl=600)
 def get_stock_data(ticker):
-    """
-    嘗試抓取現價，若失敗則嘗試加入 .TW 後綴 (針對台股)
-    """
-    def _fetch(t):
-        s = yf.Ticker(t)
-        h = s.history(period='1mo', auto_adjust=True)
-        return h
-    
     try:
-        hist = _fetch(ticker)
-        if hist.empty:
-            # Try appending .TW for Taiwan stocks
-            hist = _fetch(f"{ticker}.TW")
-            
+        # 使用修復後的代號
+        real_ticker = fix_ticker_suffix(ticker)
+        stock = yf.Ticker(real_ticker)
+        hist = stock.history(period='1mo', auto_adjust=True)
+        
         if not hist.empty:
             current_price = hist['Close'].iloc[-1]
             if len(hist) > 1:
@@ -84,41 +102,38 @@ def get_stock_data(ticker):
         return 0.0, 0.0
     except: return 0.0, 0.0
 
-@st.cache_data(ttl=86400) 
+# [v9.0 Update] 移除 Cache 以確保除錯準確性，並加入詳細 Log
 def get_historical_price_window(ticker, trade_date, window_days=10):
-    """
-    [v8.9.1 Fix] 增強版抓取：自動嘗試 .TW 後綴，確保抓得到台股
-    """
-    def _fetch_window(t, start, end):
-        s = yf.Ticker(t)
-        return s.history(start=start, end=end, auto_adjust=True)
-
     try:
         t_date = pd.to_datetime(trade_date)
-        start_d = (t_date - timedelta(days=window_days + 5)).strftime('%Y-%m-%d')
-        end_d = (t_date + timedelta(days=window_days + 5)).strftime('%Y-%m-%d')
+        start_d = (t_date - timedelta(days=window_days + 15)).strftime('%Y-%m-%d')
+        end_d = (t_date + timedelta(days=window_days + 15)).strftime('%Y-%m-%d')
         
-        # 第一次嘗試
-        hist = _fetch_window(ticker, start_d, end_d)
+        # 1. 智慧修復代號
+        real_ticker = fix_ticker_suffix(ticker)
         
-        # 若是空的，且看起來像數字 (台股代號)，嘗試加 .TW
-        if hist.empty and ticker.isdigit():
-            hist = _fetch_window(f"{ticker}.TW", start_d, end_d)
+        # 2. 抓取數據
+        stock = yf.Ticker(real_ticker)
+        hist = stock.history(start=start_d, end=end_d, auto_adjust=True)
+        
+        if hist.empty:
+            return None, f"找不到數據 ({real_ticker})"
             
-        if hist.empty: return None
-        
-        # 篩選視窗
+        # 3. 篩選視窗
         mask_window = (hist.index >= (t_date - timedelta(days=window_days))) & (hist.index <= (t_date + timedelta(days=window_days)))
         window_df = hist.loc[mask_window]
         
-        if window_df.empty: return None
+        if window_df.empty:
+            return None, f"視窗內無數據 (日期 {trade_date})"
         
         return {
             "window_high": window_df['High'].max(),
             "window_low": window_df['Low'].min(),
-            "price_at_trade": window_df['Close'].mean() # 簡化取均價
-        }
-    except: return None
+            "price_at_trade": window_df['Close'].mean(),
+            "real_ticker": real_ticker # 回傳最終使用的代號
+        }, "Success"
+    except Exception as e:
+        return None, str(e)
 
 def normalize_data(df):
     if df.empty: return df
@@ -289,7 +304,7 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     return summary, period_df, pd.DataFrame()
 
 # ==========================================
-# 3. AI 教練核心邏輯 (v8.9.1 Enhanced Formatting & Robustness)
+# 3. AI 教練核心邏輯 (v9.0 Debug Mode)
 # ==========================================
 def ask_gemini_coach(api_key, prompt_text):
     if not api_key: return "⚠️ 未偵測到 API Key，請檢查 Secrets 設定。"
@@ -317,23 +332,20 @@ def dialog_global_analysis(full_portfolio_df, summary_metrics):
             
         prompt = f"""
         你是一位專業的資產配置顧問。請依據以下數據進行全域診斷。
-        
-        【排版要求 (重要)】
-        1. 請使用 Markdown 標題語法 (###) 來區分段落。
-        2. 針對「高風險」、「現金不足」、「過度集中」等負面或警示資訊，請務必使用 Streamlit 紅色語法 :red[你的警示文字] 來標示。
+        【排版要求】
+        1. 使用 Markdown (###) 區分段落。
+        2. 重要警示使用 :red[文字] 標註。
         3. 請使用繁體中文。
-
         【資產數據】
         - 股票庫存現值: ${summary_metrics['庫存現值']:,.0f}
         - 閒置現金餘額: ${cash_balance:,.0f}
         - 總資產: ${total_assets:,.0f}
-        - 現金水位: {cash_ratio:.1f}% (建議值: 10-30%)
+        - 現金水位: {cash_ratio:.1f}%
         - 未實現損益: ${summary_metrics['未實現損益']:,.0f}
         【前五大持股】{holdings_str}
-        
         【分析重點】1. 資金效率。2. 集中度風險。3. 整體配置建議。
         """
-        with st.spinner("AI 正在分析資金效率與風險 (含格式優化)..."):
+        with st.spinner("AI 正在分析資金效率與風險..."):
             advice = ask_gemini_coach(api_key, prompt)
             st.session_state['ai_result'] = advice; st.rerun()
 
@@ -341,54 +353,62 @@ def run_swing_analysis_advanced(df_raw, trade_log_df):
     api_key = st.secrets.get("gemini_api_key", None)
     if not api_key: st.error("無 API Key"); return
     
-    # [v8.9.1] 增加防呆：確認是否有波段交易
     buys = df_raw[(df_raw['Strategy'].str.contains('波段', na=False)) & (df_raw['Action'] == '買入')].tail(5) 
     sells = trade_log_df[trade_log_df['Strategy'].str.contains('波段', na=False)].tail(5)
     
     if buys.empty and sells.empty:
-        return "⚠️ 未偵測到「波段」策略的交易紀錄。請確認 Google Sheet 的 'Strategy' 欄位是否包含 '波段' 字眼。"
+        return "⚠️ 未偵測到「波段」策略的交易紀錄。"
 
-    analysis_log = "[買入點位回測 - Entry Analysis]\n"
-    with st.status("正在進行雙向股價回測 (自動補正台股代號)...", expanded=True) as status:
+    analysis_log = "[買入點位回測]\n"
+    with st.status("🚀 啟動波段回測 (代號自動修復中)...", expanded=True) as status:
         for _, row in buys.iterrows():
             ticker = row['Ticker']; buy_date = row['Date']; buy_price = row['Price']
-            context = get_historical_price_window(ticker, buy_date)
+            status.write(f"🔍 分析買入: {ticker} ({buy_date})")
+            
+            context, msg = get_historical_price_window(ticker, buy_date)
+            
             if context:
                 win_low = context['window_low']
+                real_t = context['real_ticker']
                 dist_low = ((buy_price - win_low) / win_low * 100)
-                status.write(f"回測買入 {ticker}: 買價 {buy_price}, 區間最低 {win_low:.2f} (距離 +{dist_low:.1f}%)")
-                analysis_log += f"- {ticker} 買入 {buy_date}: 買價 {buy_price}, 視窗最低 {win_low:.2f} (距離 +{dist_low:.1f}%)\n"
+                status.write(f"✅ 成功 ({real_t}): 買價 {buy_price}, 低點 {win_low:.2f}")
+                analysis_log += f"- {real_t} 買入 {buy_date}: 買價 {buy_price}, 區間最低 {win_low:.2f} (距離 +{dist_low:.1f}%)\n"
             else:
-                analysis_log += f"- {ticker}: 無法取得歷史股價 (可能代號錯誤或無數據)\n"
+                status.write(f"❌ 失敗: {msg}")
+                analysis_log += f"- {ticker}: 無法取得歷史股價 ({msg})\n"
                 
-        analysis_log += "\n[賣出點位回測 - Exit Analysis]\n"
+        analysis_log += "\n[賣出點位回測]\n"
         for _, row in sells.iterrows():
             ticker = row['Ticker']; sell_date = row['Date']; sell_price = row['SellPrice']
-            context = get_historical_price_window(ticker, sell_date)
+            status.write(f"🔍 分析賣出: {ticker} ({sell_date})")
+            
+            context, msg = get_historical_price_window(ticker, sell_date)
+            
             if context:
                 win_high = context['window_high']
+                real_t = context['real_ticker']
                 missed = ((win_high - sell_price) / sell_price * 100)
-                status.write(f"回測賣出 {ticker}: 賣價 {sell_price:.2f}, 區間最高 {win_high:.2f} (賣飛 -{missed:.1f}%)")
-                analysis_log += f"- {ticker} 賣出 {sell_date}: 賣價 {sell_price:.2f}, 視窗最高 {win_high:.2f} (賣飛 {missed:.1f}%), 該筆損益 ${row['PnL']:.0f}\n"
+                status.write(f"✅ 成功 ({real_t}): 賣價 {sell_price:.2f}, 高點 {win_high:.2f}")
+                analysis_log += f"- {real_t} 賣出 {sell_date}: 賣價 {sell_price:.2f}, 區間最高 {win_high:.2f} (賣飛 {missed:.1f}%), 損益 ${row['PnL']:.0f}\n"
             else:
-                analysis_log += f"- {ticker}: 無法取得歷史股價\n"
+                status.write(f"❌ 失敗: {msg}")
+                analysis_log += f"- {ticker}: 無法取得歷史股價 ({msg})\n"
         
-        status.update(label="回測完成！正在生成精美報告...", state="complete", expanded=False)
+        status.update(label="回測完成！正在生成 AI 報告...", state="complete", expanded=False)
 
     prompt = f"""
-    你是一位嚴格的波段交易教練。請依據以下「交易日 前後10天」的雙向回測數據，點評我的擇時能力。
-
-    【排版要求 (重要)】
-    1. 使用 Markdown 標題 (###) 區分段落。
-    2. 針對「賣飛」、「虧損」、「追高」等嚴重問題，務必使用紅色標示 :red[文字]。
-    3. 若數據顯示 "無法取得歷史股價"，請溫馨提醒使用者檢查代號。
+    你是一位嚴格的波段交易教練。請依據以下回測數據點評。
+    【排版要求】
+    1. 使用 Markdown (###) 區分段落。
+    2. 重要警示使用 :red[文字] 標註。
+    3. 若數據顯示 "無法取得歷史股價"，請溫馨提醒使用者檢查 Google Sheet 的代號是否正確。
 
     【波段交易回測數據】{analysis_log}
 
     【分析重點】
     1. **買點精準度**：買價距離最低點 < 5% 為「:green[精準抄底]」；距離 > 15% 為「:red[追高風險]」。
     2. **賣點精準度**：賣價距離最高點 < 5% 為「:green[賣得漂亮]」；賣飛幅度 > 10% 為「:red[太早獲利了結]」。
-    3. **總結建議**：給予具體改進方向。
+    3. **總結建議**。
     """
     return ask_gemini_coach(api_key, prompt)
 
@@ -405,18 +425,12 @@ def run_dividend_analysis(full_portfolio_df):
     
     prompt = f"""
     你是一位價值投資專家。請檢視以下的存股組合健康度。
-
     【排版要求】
     1. 使用 Markdown (###) 標題。
-    2. 若有「賺股息賠價差」的情況 (已領股息 < 帳面虧損)，請用 :red[紅色警告]。
-    3. 若 YoC > 6%，請用 :green[綠色] 標示優質標的。
-
+    2. 若有「賺股息賠價差」的情況，請用 :red[紅色警告]。
+    3. 若 YoC > 6%，請用 :green[綠色] 標示。
     【存股庫存數據】{stocks_str}
-    
-    【分析重點】
-    1. **高殖利率陷阱偵測**。
-    2. **持有信心**：針對 YoC 高的標的給予鼓勵。
-    3. **複利建議**。
+    【分析重點】1. 高殖利率陷阱。2. 持有信心。3. 複利建議。
     """
     return ask_gemini_coach(api_key, prompt)
 
@@ -483,9 +497,7 @@ def render_global_monthly_pnl_colored(trade_log_df, df_records):
     st.altair_chart(chart, use_container_width=True)
 
 def render_metrics_cards(summary, mode):
-    # Safety Check: Prevent NameError if summary is None
     if not summary: return
-
     if mode == "swing": 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("累積總損益", f"${summary['累積總損益']:,.0f}")
@@ -646,7 +658,7 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v8.9.1 (Pro AI)")
+st.title("📊 投資戰情室 v9.0 (Pro AI)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
@@ -664,13 +676,12 @@ with f3: selected_tickers = st.multiselect("投資標的", all_tickers, default=
 
 st.divider()
 
-# 初始化變數 (Initialization) - 確保 total_summary 絕對存在
+# 初始化變數
 total_summary = None
 
 if not selected_tickers:
     t_all, t_swing, t_div, t_ai = st.tabs(["🌍 全總覽", "⚡ 波段", "💰 存股", "🤖 AI 教練"])
     
-    # 預先計算總表
     if not df.empty:
         total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
 
@@ -696,16 +707,14 @@ if not selected_tickers:
         c_ai_1, c_ai_2, c_ai_3 = st.columns(3)
         
         with c_ai_1:
-            # 確保有數據可傳遞
             total_sum_ai = total_summary if total_summary else analyze_period_advanced(df, min_date, date.today(), None, full_portfolio_df, trade_log_df, None)[0]
             if st.button("🌍 全域總覽診斷", use_container_width=True):
                 dialog_global_analysis(full_portfolio_df, total_sum_ai)
         
         with c_ai_2:
             if st.button("⚡ 波段交易回測 (±10日)", use_container_width=True):
-                with st.spinner("正在抓取歷史股價並進行分析 (台股自動修正)..."):
-                    advice = run_swing_analysis_advanced(df, trade_log_df)
-                    st.session_state['ai_result'] = advice
+                advice = run_swing_analysis_advanced(df, trade_log_df)
+                st.session_state['ai_result'] = advice
         
         with c_ai_3:
             if st.button("💰 存股體質健檢", use_container_width=True):
