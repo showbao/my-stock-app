@@ -1,5 +1,5 @@
-# Version: v9.0 (Swing Fix + Debug Mode + Ticker Auto-Correction)
-# CTOSignature: Implemented robust .TW/.TWO auto-detection, Removed caching for reliable fetching, Added verbose debug logs.
+# Version: v9.1 (Timezone Mismatch Fix + Ticker Auto-Fix + Formatting)
+# CTOSignature: Fixed 'Asia/Taipei' vs Naive comparison error by stripping timezones.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -10,12 +10,11 @@ import numpy as np
 from scipy import optimize
 import altair as alt
 import google.generativeai as genai
-import time
 
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v9.0", layout="wide")
+st.set_page_config(page_title="投資戰情室 v9.1", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -58,21 +57,17 @@ def get_usd_twd_rate():
         return 32.0
     except: return 32.0
 
-# [v9.0 New] 獨立的代號修復邏輯
 def fix_ticker_suffix(ticker):
     """
-    智慧判斷台股代號：
-    1. 若已有後綴 (如 .TW)，直接回傳。
-    2. 若無後綴且為數字，先試 .TW (上市)，再試 .TWO (上櫃)。
+    智慧判斷台股代號：優先嘗試 .TW (上市) 與 .TWO (上櫃)
     """
     ticker = str(ticker).strip().upper()
     if not ticker.isdigit(): 
-        return ticker # 美股或其他
+        return ticker 
     
     # 嘗試上市
     try_tw = f"{ticker}.TW"
     stock = yf.Ticker(try_tw)
-    # 快速檢查是否有資料 (抓一天)
     if not stock.history(period="1d").empty:
         return try_tw
         
@@ -82,12 +77,11 @@ def fix_ticker_suffix(ticker):
     if not stock.history(period="1d").empty:
         return try_two
         
-    return ticker # 真的找不到，回傳原始值
+    return ticker 
 
 @st.cache_data(ttl=600)
 def get_stock_data(ticker):
     try:
-        # 使用修復後的代號
         real_ticker = fix_ticker_suffix(ticker)
         stock = yf.Ticker(real_ticker)
         hist = stock.history(period='1mo', auto_adjust=True)
@@ -102,24 +96,30 @@ def get_stock_data(ticker):
         return 0.0, 0.0
     except: return 0.0, 0.0
 
-# [v9.0 Update] 移除 Cache 以確保除錯準確性，並加入詳細 Log
+# [v9.1 FIX] 加入時區移除邏輯 (tz_localize(None))
 def get_historical_price_window(ticker, trade_date, window_days=10):
     try:
-        t_date = pd.to_datetime(trade_date)
-        start_d = (t_date - timedelta(days=window_days + 15)).strftime('%Y-%m-%d')
-        end_d = (t_date + timedelta(days=window_days + 15)).strftime('%Y-%m-%d')
+        # 1. 確保交易日期是沒有時區的 (Naive)
+        t_date = pd.to_datetime(trade_date).tz_localize(None)
         
-        # 1. 智慧修復代號
+        start_d = (t_date - timedelta(days=window_days + 20)).strftime('%Y-%m-%d')
+        end_d = (t_date + timedelta(days=window_days + 20)).strftime('%Y-%m-%d')
+        
+        # 2. 智慧修復代號
         real_ticker = fix_ticker_suffix(ticker)
         
-        # 2. 抓取數據
+        # 3. 抓取數據
         stock = yf.Ticker(real_ticker)
         hist = stock.history(start=start_d, end=end_d, auto_adjust=True)
         
         if hist.empty:
             return None, f"找不到數據 ({real_ticker})"
             
-        # 3. 篩選視窗
+        # [CRITICAL FIX] 4. 強制移除 yfinance 回傳的時區資訊，避免與 t_date 衝突
+        if hist.index.tz is not None:
+            hist.index = hist.index.tz_localize(None)
+            
+        # 5. 篩選視窗
         mask_window = (hist.index >= (t_date - timedelta(days=window_days))) & (hist.index <= (t_date + timedelta(days=window_days)))
         window_df = hist.loc[mask_window]
         
@@ -130,7 +130,7 @@ def get_historical_price_window(ticker, trade_date, window_days=10):
             "window_high": window_df['High'].max(),
             "window_low": window_df['Low'].min(),
             "price_at_trade": window_df['Close'].mean(),
-            "real_ticker": real_ticker # 回傳最終使用的代號
+            "real_ticker": real_ticker 
         }, "Success"
     except Exception as e:
         return None, str(e)
@@ -304,7 +304,7 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     return summary, period_df, pd.DataFrame()
 
 # ==========================================
-# 3. AI 教練核心邏輯 (v9.0 Debug Mode)
+# 3. AI 教練核心邏輯
 # ==========================================
 def ask_gemini_coach(api_key, prompt_text):
     if not api_key: return "⚠️ 未偵測到 API Key，請檢查 Secrets 設定。"
@@ -658,7 +658,7 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v9.0 (Pro AI)")
+st.title("📊 投資戰情室 v9.1 (Pro AI)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
