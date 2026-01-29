@@ -1,5 +1,5 @@
-# Version: v9.7.3 (Stability Fix: Detailed Connection Debug + Layout Variable Fix)
-# CTOSignature: Unpacked layout variables to prevent NameError. Added granular try-except blocks for Google Sheet connection debugging.
+# Version: v9.7.4 (Layout Scope Fix: Decoupled st.columns from logic)
+# CTOSignature: Moved st.columns initialization outside conditional blocks to guarantee variable existence. Fixed NameError.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -15,7 +15,7 @@ import time
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v9.7.3", layout="wide")
+st.set_page_config(page_title="投資戰情室 v9.7.4", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -35,33 +35,25 @@ def connect_google_sheet():
 
 sh = connect_google_sheet()
 
-# [v9.7.3 Fix] 獨立檢查每個工作表，提供精準錯誤訊息
 ws_records = None
 ws_funds = None
 ws_history = None
 
 if sh:
-    # 1. 嘗試連線 Records
-    try:
-        ws_records = sh.worksheet("Records")
-    except:
-        st.error("❌ 嚴重錯誤：找不到工作表 'Records'。請確認 Google Sheet 分頁名稱是否正確。")
+    try: ws_records = sh.worksheet("Records")
+    except: 
+        st.error("❌ 找不到工作表 'Records'。")
         st.stop()
         
-    # 2. 嘗試連線 Fund_Updates
-    try:
-        ws_funds = sh.worksheet("Fund_Updates")
-    except:
-        st.error("❌ 嚴重錯誤：找不到工作表 'Fund_Updates'。")
+    try: ws_funds = sh.worksheet("Fund_Updates")
+    except: 
+        st.error("❌ 找不到工作表 'Fund_Updates'。")
         st.stop()
         
-    # 3. 嘗試連線 Analysis_History (選用)
-    try:
-        ws_history = sh.worksheet("Analysis_History")
-    except:
-        ws_history = None # 這是一個選用功能，找不到沒關係，不擋流程
+    try: ws_history = sh.worksheet("Analysis_History")
+    except: ws_history = None
 else:
-    st.error("❌ Google Sheet 連線失敗 (API 認證錯誤或網路問題)。")
+    st.error("❌ Google Sheet 連線失敗。")
     st.stop()
 
 # ==========================================
@@ -666,7 +658,7 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v9.7.3 (Stability Fix)")
+st.title("📊 投資戰情室 v9.7.4 (Layout Fix)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
@@ -684,28 +676,31 @@ with f3: selected_tickers = st.multiselect("投資標的", all_tickers, default=
 
 st.divider()
 
+# [v9.7.4 FIX] Initialize total_summary to avoid NameError if try block fails
 total_summary = None
 
 if not selected_tickers:
     t_all, t_swing, t_div, t_ai = st.tabs(["🌍 全總覽", "⚡ 波段儀表板", "💰 存股月報", "🤖 AI 設定"])
     
+    # Calculate summary safely
     if not df.empty:
         try:
             total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
-        except:
+        except Exception as e:
+            st.error(f"計算數據時發生錯誤: {e}")
             total_summary = None
 
     with t_all:
         if total_summary:
             render_metrics_cards(total_summary, "general")
-            # [v9.7.3 FIX] Split lines to ensure variables are defined safely
-            st.write("")
-            g_col1, g_col2 = st.columns([1, 2])
-            
-            with g_col1: 
-                render_allocation_charts(full_portfolio_df)
-            with g_col2: 
-                render_global_monthly_pnl_colored(trade_log_df, df)
+        
+        # [v9.7.4 FIX] Unpack columns outside the 'if' block to ensure variables exist
+        st.write("")
+        g_col1, g_col2 = st.columns([1, 2])
+        
+        if total_summary: # Only populate if data exists
+            with g_col1: render_allocation_charts(full_portfolio_df)
+            with g_col2: render_global_monthly_pnl_colored(trade_log_df, df)
                 
         st.divider(); render_inventory_management(full_portfolio_df, df, "overview")
         
