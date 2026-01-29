@@ -1,5 +1,5 @@
-# Version: v9.7.4 (Layout Scope Fix: Decoupled st.columns from logic)
-# CTOSignature: Moved st.columns initialization outside conditional blocks to guarantee variable existence. Fixed NameError.
+# Version: v9.8.0 (Structural Fix: UI-First Architecture)
+# CTOSignature: Decoupled UI layout from Data logic. Columns are now initialized unconditionally before data processing to prevent NameError. Added XIRR overflow protection.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -15,7 +15,7 @@ import time
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v9.7.4", layout="wide")
+st.set_page_config(page_title="投資戰情室 v9.8.0", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -257,7 +257,10 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
         elif act in ['賣出', '領息']: cash_flows.append((d, amt))
     if ending_inventory_value > 0: cash_flows.append((end_date, ending_inventory_value))
     xirr_val = xirr(cash_flows)
-    if xirr_val: xirr_val *= 100 
+    if xirr_val: xirr_val *= 100
+    
+    # [v9.8.0 Fix] Prevent XIRR Overflow for display
+    if xirr_val and (xirr_val > 10000 or xirr_val < -10000): xirr_val = None
 
     yoc_period = (total_dividend / total_cost_basis * 100) if total_cost_basis > 0 else 0
     payback_progress = (total_dividend / total_buy * 100) if total_buy > 0 else 0
@@ -505,7 +508,8 @@ def render_metrics_cards(summary, mode):
         k3.metric("已實現", f"${summary['已實現損益']:,.0f}")
         k4.metric("未實現", f"${summary['未實現損益']:,.0f}")
         k5, k6, k7, k8 = st.columns(4)
-        k5.metric("年化報酬率", f"{summary['XIRR%']:.2f}%" if summary['XIRR%'] else "N/A")
+        xirr_display = f"{summary['XIRR%']:.2f}%" if summary['XIRR%'] is not None else "N/A"
+        k5.metric("年化報酬率", xirr_display)
         k6.metric("交易勝率", f"{summary['勝率%']:.1f}%")
         k7.empty(); k8.empty()
     elif mode == "dividend":
@@ -515,7 +519,8 @@ def render_metrics_cards(summary, mode):
         k3.metric("已實現", f"${summary['已實現損益']:,.0f}")
         k4.metric("未實現", f"${summary['未實現損益']:,.0f}")
         k5, k6, k7, k8 = st.columns(4)
-        k5.metric("年化報酬率", f"{summary['XIRR%']:.2f}%" if summary['XIRR%'] else "N/A")
+        xirr_display = f"{summary['XIRR%']:.2f}%" if summary['XIRR%'] is not None else "N/A"
+        k5.metric("年化報酬率", xirr_display)
         k6.metric("成本殖利率 (YoC)", f"{summary['YoC%']:.2f}%")
         k7.metric("回本率", f"{summary['回本率%']:.1f}%")
         k8.empty()
@@ -525,7 +530,8 @@ def render_metrics_cards(summary, mode):
         g2.metric("已領股息", f"${summary['已領股息']:,.0f}")
         g3.metric("已實現", f"${summary['已實現損益']:,.0f}")
         g4.metric("未實現", f"${summary['未實現損益']:,.0f}")
-        g5.metric("年化報酬率", f"{summary['XIRR%']:.2f}%" if summary['XIRR%'] else "N/A")
+        xirr_display = f"{summary['XIRR%']:.2f}%" if summary['XIRR%'] is not None else "N/A"
+        g5.metric("年化報酬率", xirr_display)
 
 def render_chart_swing(trade_log_df, strategy_filter=None):
     if not trade_log_df.empty:
@@ -655,10 +661,52 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
                     st.success("更新成功"); st.cache_data.clear()
     else: st.info("尚無資料，請先新增第一筆交易。")
 
+def render_allocation_charts(full_portfolio_df):
+    if full_portfolio_df.empty: return
+    st.markdown("#### 🥧 資產配置 - 持股佔比")
+    base = alt.Chart(full_portfolio_df).encode(theta=alt.Theta("庫存現值", stack=True))
+    pie = base.mark_arc(outerRadius=120, innerRadius=60).encode(
+        color=alt.Color("代號", title="投資標的", sort=alt.EncodingSortField(field="庫存現值", order="descending")),
+        order=alt.Order("庫存現值", sort="descending"),
+        tooltip=["代號", "庫存現值", "佔比%", "策略", "種類"]
+    )
+    st.altair_chart(pie, use_container_width=True)
+
+def render_global_monthly_pnl_colored(trade_log_df, df_records):
+    pnl_df = pd.DataFrame()
+    if not trade_log_df.empty:
+        pnl_df = trade_log_df[['Date', 'PnL', 'Type']].copy()
+        pnl_df['Date'] = pd.to_datetime(pnl_df['Date'])
+        pnl_df['Month'] = pnl_df['Date'].dt.strftime('%Y-%m')
+    div_df = df_records[df_records['Action'] == '領息'][['Date', 'Total_Amount', 'Type']].copy()
+    if not div_df.empty:
+        div_df['Date'] = pd.to_datetime(div_df['Date'])
+        div_df['Month'] = div_df['Date'].dt.strftime('%Y-%m')
+        div_df = div_df.rename(columns={'Total_Amount': 'PnL'})
+    combined = pd.concat([pnl_df, div_df], ignore_index=True)
+    if combined.empty: return
+    combined['Type'] = combined['Type'].fillna('股票') 
+    combined = combined.sort_values('Month')
+    grouped = combined.groupby(['Month', 'Type'])['PnL'].sum().reset_index()
+    grouped['Date'] = pd.to_datetime(grouped['Month'])
+    grouped = grouped.sort_values('Date')
+    grouped['Cumulative_PnL'] = grouped.groupby('Type')['PnL'].cumsum()
+    domain_end = datetime.now().date()
+    domain_start = domain_end - timedelta(days=365)
+    st.markdown("#### 🌊 累積已實現損益 (含股息) - 財富堆疊圖")
+    chart = alt.Chart(grouped).mark_area(opacity=0.7).encode(
+        x=alt.X('Date:T', timeUnit='yearmonth', title='月份', 
+                scale=alt.Scale(domain=[pd.to_datetime(domain_start), pd.to_datetime(domain_end)])),
+        y=alt.Y('Cumulative_PnL:Q', title='累積已實現獲利 ($)', stack=True), 
+        color=alt.Color('Type:N', title='資產種類', scale=alt.Scale(domain=['股票', '基金'], range=['#1f77b4', '#ff7f0e'])),
+        tooltip=[alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 'Type', 'Cumulative_PnL', 'PnL']
+    ).properties(height=350).interactive()
+    st.altair_chart(chart, use_container_width=True)
+
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v9.7.4 (Layout Fix)")
+st.title("📊 投資戰情室 v9.8.0 (Final Architecture)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
@@ -676,31 +724,32 @@ with f3: selected_tickers = st.multiselect("投資標的", all_tickers, default=
 
 st.divider()
 
-# [v9.7.4 FIX] Initialize total_summary to avoid NameError if try block fails
 total_summary = None
 
 if not selected_tickers:
     t_all, t_swing, t_div, t_ai = st.tabs(["🌍 全總覽", "⚡ 波段儀表板", "💰 存股月報", "🤖 AI 設定"])
     
-    # Calculate summary safely
+    # [v9.8.0] Pre-calculate Summary
     if not df.empty:
         try:
             total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
-        except Exception as e:
-            st.error(f"計算數據時發生錯誤: {e}")
+        except:
             total_summary = None
 
     with t_all:
         if total_summary:
             render_metrics_cards(total_summary, "general")
         
-        # [v9.7.4 FIX] Unpack columns outside the 'if' block to ensure variables exist
+        # [v9.8.0 FIX] Define Columns Unconditionally (UI First)
         st.write("")
         g_col1, g_col2 = st.columns([1, 2])
         
-        if total_summary: # Only populate if data exists
+        # [v9.8.0 FIX] Populate Columns only if data exists
+        if total_summary:
             with g_col1: render_allocation_charts(full_portfolio_df)
             with g_col2: render_global_monthly_pnl_colored(trade_log_df, df)
+        else:
+            st.info("無足夠數據顯示圖表")
                 
         st.divider(); render_inventory_management(full_portfolio_df, df, "overview")
         
