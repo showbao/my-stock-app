@@ -1,5 +1,5 @@
-# Version: v9.9.1 (Taiwan Colors + Fund Fix + Charts Restored + 2-Layer Swing Logic)
-# CTOSignature: Enforced Red=Good/Green=Bad. Fixed Fund price fetch. Restored v9.2 charts. Implemented Monthly Swing Summaries in AI Coach.
+# Version: v9.9.2 (Stability Fix: Variable Scope + Dict Keys + Fund Fallback + Taiwan Colors)
+# CTOSignature: Globalized total_summary init. Added XIRR key safety. Added Yahoo fallback for Funds. Swapped Altair colors to Red=Up/Green=Down.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -15,7 +15,7 @@ import time
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v9.9.1", layout="wide")
+st.set_page_config(page_title="投資戰情室 v9.9.2", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -41,9 +41,9 @@ ws_history = None
 
 if sh:
     try: ws_records = sh.worksheet("Records")
-    except: st.error("❌ 找不到 'Records' 工作表"); st.stop()
+    except: st.error("❌ 找不到工作表 'Records'"); st.stop()
     try: ws_funds = sh.worksheet("Fund_Updates")
-    except: st.error("❌ 找不到 'Fund_Updates' 工作表"); st.stop()
+    except: st.error("❌ 找不到工作表 'Fund_Updates'"); st.stop()
     try: ws_history = sh.worksheet("Analysis_History")
     except: ws_history = None
 else:
@@ -125,7 +125,6 @@ def load_data():
     try:
         funds_data = ws_funds.get_all_records()
         df_funds = pd.DataFrame(funds_data)
-        # 確保欄位名稱正確，防止大小寫問題
         if not df_funds.empty:
             df_funds.columns = [c.strip() for c in df_funds.columns]
     except: df_funds = pd.DataFrame()
@@ -191,23 +190,26 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
     for ticker, data in portfolio.items():
         current_price = 0; market_value = 0
         if data['shares'] > 0.001:
-            # [v9.9.1 Fix] Fund Logic
+            # [v9.9.2 FIX] Fund Logic: Sheet -> Yahoo -> Cost
             if data['type'] == '基金':
-                # 優先查找 Google Sheet 的基金更新表
+                # 1. Try Google Sheet (Fund_Updates)
                 if not df_funds.empty and ticker in df_funds['Ticker'].values:
                     fund_row = df_funds[df_funds['Ticker'] == ticker].iloc[0]
-                    # 假設 Fund_Updates 有 'Price' 或 'Net_Value' 欄位
-                    price_col = 'Price' if 'Price' in df_funds.columns else 'Net_Value' if 'Net_Value' in df_funds.columns else df_funds.columns[1] # Fallback to 2nd col
+                    price_col = 'Price' if 'Price' in df_funds.columns else 'Net_Value' if 'Net_Value' in df_funds.columns else df_funds.columns[1]
                     net_val = pd.to_numeric(fund_row[price_col], errors='coerce')
-                    
                     currency = 'USD'
                     if 'Currency' in df_funds.columns: currency = fund_row['Currency']
                     current_price = net_val if currency == 'TWD' else net_val * current_usd_rate
+                
+                # 2. If Sheet failed (0 or NaN), try Yahoo Finance
+                if current_price == 0 or pd.isna(current_price):
+                    current_price, _ = get_stock_data(ticker)
             else:
                 current_price, _ = get_stock_data(ticker)
             
-            # 若仍為 0，嘗試最後手段
-            if current_price == 0 and data['type'] == '股票': current_price, _ = get_stock_data(ticker)
+            # 3. Last Resort: Use Cost (to avoid -100% loss display)
+            if current_price == 0 or pd.isna(current_price):
+                current_price = data['total_cost'] / data['shares'] if data['shares'] > 0 else 0
                 
             market_value = current_price * data['shares']
             unrealized_pl = market_value - data['total_cost']
@@ -261,9 +263,14 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
         if act == '買入': cash_flows.append((d, -amt))
         elif act in ['賣出', '領息']: cash_flows.append((d, amt))
     if ending_inventory_value > 0: cash_flows.append((end_date, ending_inventory_value))
-    xirr_val = xirr(cash_flows)
-    if xirr_val: xirr_val *= 100
-    if xirr_val and (xirr_val > 10000 or xirr_val < -10000): xirr_val = None
+    
+    xirr_val = None
+    try:
+        xirr_val = xirr(cash_flows)
+        if xirr_val: 
+            xirr_val *= 100
+            if xirr_val > 10000 or xirr_val < -10000: xirr_val = None
+    except: xirr_val = None
 
     yoc_period = (total_dividend / total_cost_basis * 100) if total_cost_basis > 0 else 0
     payback_progress = (total_dividend / total_buy * 100) if total_buy > 0 else 0
@@ -288,20 +295,13 @@ def ask_gemini_coach(api_key, prompt_text):
         return response.text
     except Exception as e: return f"❌ AI 錯誤: {str(e)}"
 
-# --- Analysis History Manager ---
 def get_analysis_history(report_type_prefix):
-    """
-    獲取指定類型的歷史報告，回傳 Dictionary: {Key: Content}
-    Key for Swing: 'Swing_Summary_{Ticker}_{Year_Month}'
-    """
     if ws_history is None: return {}
     try:
         data = ws_history.get_all_records()
         df_hist = pd.DataFrame(data)
         if df_hist.empty: return {}
-        # Filter where Type starts with prefix
         target = df_hist[df_hist['Type'].astype(str).str.startswith(report_type_prefix)]
-        # Convert to dict for O(1) lookup
         return pd.Series(target.Content.values, index=target.Type).to_dict()
     except: return {}
 
@@ -329,12 +329,10 @@ def update_google_sheet_review(updates_list):
             st.cache_data.clear() 
     except Exception as e: st.error(f"寫入失敗: {e}")
 
-# --- AI Action Logic ---
 def run_swing_analysis_action(df_raw, trade_log_df):
     api_key = st.secrets.get("gemini_api_key", None)
     if not api_key: st.error("無 API Key"); return None
 
-    # 1. 找出未分析的交易
     pending = df_raw[
         (df_raw['Strategy'].str.contains('波段', na=False)) & 
         ((df_raw['AI_Review'] == "") | (df_raw['AI_Review'].isna()))
@@ -342,24 +340,22 @@ def run_swing_analysis_action(df_raw, trade_log_df):
     
     if pending.empty: return "🎉 所有交易皆已分析完成。"
 
-    # 2. 取最新 10 筆進行處理
     target_batch = pending.sort_values('Date', ascending=False).head(10)
     updates_to_commit = []
-    monthly_summaries_to_save = {} # Key: Ticker_YYYY-MM, Value: Text
+    monthly_summaries_to_save = {}
 
     with st.status("🚀 AI 正在逐筆檢視並生成月報...", expanded=True) as status:
-        # A. 逐筆分析 (Row Level)
         for _, row in target_batch.iterrows():
             t = row['Ticker']; d = row['Date']; px = row['Price']; act = row['Action']; rid = row['RowIndex']
             
-            context = get_historical_price_window(t, d, 7) # T+/-7
+            context = get_historical_price_window(t, d, 7)
             if context:
                 if act == '買入':
                     low = context['window_low']; dist = ((px - low)/low * 100)
-                    prompt = f"評估買點: {t} {d} 買 {px}, 7日低點 {low} (差距 {dist:.1f}%). 用繁中, :red[好]/:green[壞] 標示."
+                    prompt = f"評估買點: {t} {d} 買 {px}, 7日低點 {low} (差距 {dist:.1f}%). 用繁中, :red[精準/好]/:green[追高/差] 標示."
                 else:
                     high = context['window_high']; missed = ((high - px)/px * 100)
-                    prompt = f"評估賣點: {t} {d} 賣 {px}, 7日高點 {high} (賣飛 {missed:.1f}%). 用繁中, :red[好]/:green[壞] 標示."
+                    prompt = f"評估賣點: {t} {d} 賣 {px}, 7日高點 {high} (賣飛 {missed:.1f}%). 用繁中, :red[漂亮/好]/:green[賣飛/差] 標示."
                 
                 review = ask_gemini_coach(api_key, prompt).strip()
                 final_text = f"[{date.today()}] {review}"
@@ -367,8 +363,6 @@ def run_swing_analysis_action(df_raw, trade_log_df):
             else:
                 updates_to_commit.append((rid, "[無股價數據]"))
 
-        # B. 生成月報 (Monthly Summary Level)
-        # 找出這批交易涉及哪些 (Ticker, Month)
         target_batch['YYYYMM'] = pd.to_datetime(target_batch['Date']).dt.strftime('%Y-%m')
         groups = target_batch.groupby(['Ticker', 'YYYYMM'])
         
@@ -395,7 +389,7 @@ def run_swing_analysis_action(df_raw, trade_log_df):
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v9.9.1 (Flagship)")
+st.title("📊 投資戰情室 v9.9.2 (Stable)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
@@ -413,6 +407,7 @@ with f3: selected_tickers = st.multiselect("投資標的", all_tickers, default=
 
 st.divider()
 
+# [v9.9.2 FIX] Global Initialization
 total_summary = None
 
 if not selected_tickers:
@@ -436,44 +431,45 @@ if not selected_tickers:
                 
         st.divider(); render_inventory_management(full_portfolio_df, df, "overview")
         
-        # 讀取全域報告
         global_report = get_analysis_history("Global")
         if global_report:
             st.markdown("### 📝 最新全域診斷")
-            st.markdown(list(global_report.values())[-1]) # Show latest
+            st.markdown(list(global_report.values())[-1])
 
     # --- Tab 2: 波段儀表板 ---
     with t_swing:
         if total_summary:
             render_metrics_cards(total_summary, "swing")
             st.markdown("##### 📈 交易損益曲線")
-            render_chart_swing(trade_log_df)
+            # [v9.9.2 FIX] Altair Red/Green Logic
+            if not trade_log_df.empty:
+                line = alt.Chart(trade_log_df.sort_values('Date')).mark_line(color='purple').encode(x='Date:T', y='cumsum_PnL:Q', tooltip=['Date'])
+                trade_log_df['cumsum_PnL'] = trade_log_df['PnL'].cumsum()
+                points = alt.Chart(trade_log_df).mark_circle(size=60).encode(
+                    x='Date:T', y='PnL:Q', 
+                    color=alt.condition(alt.datum.PnL > 0, alt.value("red"), alt.value("green")), # Red=Profit
+                    tooltip=['Date', 'Ticker', 'PnL']
+                )
+                st.altair_chart((alt.Chart(trade_log_df).mark_line(color='purple').encode(x='Date:T', y='cumsum_PnL:Q') + points).interactive(), use_container_width=True)
             
         st.divider()
         st.markdown("### ⚡ 波段交易履歷 (按月歸檔)")
         
-        # 讀取所有波段月報
         swing_summaries = get_analysis_history("Swing_Summary_")
-        
         swing_tickers = df[df['Strategy'].str.contains('波段', na=False)]['Ticker'].unique()
         
         for t in swing_tickers:
             with st.expander(f"📌 {t} 交易紀錄"):
-                # 1. 找出該標的的所有波段交易，按月分組
                 t_df = df[(df['Ticker'] == t) & (df['Strategy'].str.contains('波段', na=False))].copy()
                 t_df['YYYYMM'] = pd.to_datetime(t_df['Date']).dt.strftime('%Y-%m')
-                months = t_df['YYYYMM'].unique()
-                months = sorted(months, reverse=True) # Newest month first
+                months = sorted(t_df['YYYYMM'].unique(), reverse=True)
                 
                 for m in months:
                     st.markdown(f"**🗓️ {m}**")
-                    
-                    # 顯示該月 AI 總結 (若有)
                     sum_key = f"Swing_Summary_{t}_{m}"
                     if sum_key in swing_summaries:
                         st.info(swing_summaries[sum_key])
                     
-                    # 顯示該月逐筆交易
                     m_trades = t_df[t_df['YYYYMM'] == m].sort_values('Date', ascending=False)
                     for _, row in m_trades.iterrows():
                         review = row['AI_Review'] if row['AI_Review'] else "(待分析)"
@@ -498,17 +494,16 @@ if not selected_tickers:
             
         st.divider(); render_inventory_management(full_portfolio_df, df, "div")
 
-    # --- Tab 4: AI 教練 (Command Center) ---
+    # --- Tab 4: AI 教練 ---
     with t_ai:
         st.markdown("### 🤖 AI 指揮中心")
-        st.caption("所有分析指令皆在此執行。分析結果將自動存檔並顯示於對應儀表板。")
+        st.caption("所有分析指令皆在此執行。")
         
         c1, c2, c3 = st.columns(3)
         
         with c1:
             st.markdown("#### 🌍 1. 全域分析")
             if st.button("執行全域診斷", use_container_width=True):
-                # ... Global Logic ...
                 top_holdings = full_portfolio_df.sort_values('庫存現值', ascending=False).head(5)
                 holdings_str = ""
                 for _, row in top_holdings.iterrows():
@@ -516,7 +511,7 @@ if not selected_tickers:
                 
                 prompt = f"""
                 全域資產診斷。
-                總資產: {total_summary['庫存現值']} (未含現金)。
+                總資產: {total_summary['庫存現值'] if total_summary else 0} (未含現金)。
                 前五大持股: \n{holdings_str}
                 請使用台股慣例顏色 (:red[好/獲利], :green[壞/虧損]) 給予建議。
                 """
@@ -530,19 +525,18 @@ if not selected_tickers:
         with c2:
             st.markdown("#### ⚡ 2. 波段批次覆盤")
             if st.button("執行波段分析 (10筆)", use_container_width=True):
-                updates, summaries = run_swing_analysis_action(df, trade_log_df)
-                if isinstance(updates, list) and updates:
+                result = run_swing_analysis_action(df, trade_log_df)
+                if isinstance(result, tuple):
+                    updates, summaries = result
                     st.session_state['swing_updates'] = updates
                     st.session_state['swing_summaries'] = summaries
                     st.success(f"分析完成！共 {len(updates)} 筆交易。請按下方存檔。")
                 else:
-                    st.info(updates) # "全部完成" message
+                    st.info(result)
             
             if st.session_state.get('swing_updates'):
                 if st.button("💾 確認存檔 (寫入 Sheet)", use_container_width=True):
-                    # 1. Save Row Reviews
                     update_google_sheet_review(st.session_state['swing_updates'])
-                    # 2. Save Monthly Summaries
                     for k, v in st.session_state['swing_summaries'].items():
                         save_analysis_history(k, v)
                     
@@ -570,7 +564,7 @@ if not selected_tickers:
                     st.warning("無存股部位")
 
 else:
-    # Single Ticker View (Simple)
     for i, ticker in enumerate(selected_tickers):
-        st.markdown(f"### 🔍 {ticker}")
-        render_inventory_management(full_portfolio_df[full_portfolio_df['代號']==ticker], df, f"tick_{i}")
+        with ticker_tabs[i]:
+            ticker_df = df[df['Ticker'] == ticker]
+            render_inventory_management(full_portfolio_df[full_portfolio_df['代號']==ticker], df, f"tick_{i}")
