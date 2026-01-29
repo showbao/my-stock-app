@@ -1,5 +1,5 @@
-# Version: v9.7.1 (Critical Fix: NameError & Sliding Window Grouping)
-# CTOSignature: Moved variable initialization to top-level scope to prevent NameError. Retained v9.7 Sliding Window logic.
+# Version: v9.7.2 (Final Fix: Restored Missing XIRR Logic)
+# CTOSignature: Fixed KeyError by restoring XIRR calculation in analyze_period_advanced. All features retained.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -15,7 +15,7 @@ import time
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v9.7.1", layout="wide")
+st.set_page_config(page_title="投資戰情室 v9.7.2", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -144,6 +144,18 @@ def load_data():
     current_usd_rate = get_usd_twd_rate()
     return df, df_funds, current_usd_rate
 
+def xirr(transactions):
+    if not transactions: return None
+    dates = [t[0] for t in transactions]
+    amounts = [t[1] for t in transactions]
+    if min(amounts) >= 0 or max(amounts) <= 0: return None
+    def xnpv(rate, amounts, dates):
+        if rate <= -1.0: return float('inf')
+        d0 = dates[0]
+        return sum([a / (1.0 + rate)**((d - d0).days / 365.0) for a, d in zip(amounts, dates)])
+    try: return optimize.newton(lambda r: xnpv(r, amounts, dates), 0.1)
+    except: return None
+
 def calculate_portfolio(df, df_funds, current_usd_rate):
     portfolio = {}
     trade_log = [] 
@@ -207,6 +219,7 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
 
     total_dividend = period_df[period_df['Action'] == '領息']['Total_Amount'].sum()
     total_buy = period_df[period_df['Action'] == '買入']['Total_Amount'].sum()
+    
     ending_inventory_value = 0; total_cost_basis = 0
     if end_date >= datetime.now().date() and not current_portfolio_df.empty:
         target_inv = current_portfolio_df
@@ -218,15 +231,34 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     total_unrealized = ending_inventory_value - total_cost_basis
     realized_pnl_period = 0; win_rate = 0
     if not trade_log_df.empty:
-        realized_pnl_period = trade_log_df['PnL'].sum()
+        t_mask = (trade_log_df['Date'] >= start_date) & (trade_log_df['Date'] <= end_date)
+        if selected_tickers: t_mask = t_mask & (trade_log_df['Ticker'].isin(selected_tickers))
+        if strategy_filter: t_mask = t_mask & (trade_log_df['Strategy'].str.contains(strategy_filter, na=False))
+        period_trades = trade_log_df[t_mask]
+        if not period_trades.empty:
+            realized_pnl_period = period_trades['PnL'].sum()
+            wins = period_trades[period_trades['PnL'] > 0]
+            if len(period_trades) > 0: win_rate = (len(wins) / len(period_trades)) * 100
 
     total_profit = realized_pnl_period + total_unrealized + total_dividend
+    
+    # [v9.7.2 FIX] Restore XIRR Logic
+    cash_flows = []
+    for _, row in period_df.iterrows():
+        d = row['Date']; amt = row['Total_Amount']; act = row['Action']
+        if act == '買入': cash_flows.append((d, -amt))
+        elif act in ['賣出', '領息']: cash_flows.append((d, amt))
+    if ending_inventory_value > 0: cash_flows.append((end_date, ending_inventory_value))
+    xirr_val = xirr(cash_flows)
+    if xirr_val: xirr_val *= 100 
+
     yoc_period = (total_dividend / total_cost_basis * 100) if total_cost_basis > 0 else 0
     payback_progress = (total_dividend / total_buy * 100) if total_buy > 0 else 0
 
     summary = {
         "累積總損益": total_profit, "已領股息": total_dividend, "已實現損益": realized_pnl_period,
-        "未實現損益": total_unrealized, "勝率%": win_rate, "YoC%": yoc_period, "庫存現值": ending_inventory_value
+        "未實現損益": total_unrealized, "勝率%": win_rate, "XIRR%": xirr_val, # Fix: Added XIRR
+        "YoC%": yoc_period, "回本率%": payback_progress, "庫存現值": ending_inventory_value
     }
     return summary, period_df, pd.DataFrame()
 
@@ -619,7 +651,7 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v9.7.1 (Pro AI)")
+st.title("📊 投資戰情室 v9.7.2 (Final Fix)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
@@ -637,7 +669,7 @@ with f3: selected_tickers = st.multiselect("投資標的", all_tickers, default=
 
 st.divider()
 
-# [CRITICAL FIX] Force initialization of total_summary at the very top level
+# Force initialization of total_summary at the very top level
 total_summary = None
 
 if not selected_tickers:
