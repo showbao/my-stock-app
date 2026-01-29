@@ -1,5 +1,5 @@
-# Version: v10.0 (The Perfect Merge: v9.2 UI + v9.10 Dual-Layer AI Logic)
-# CTOSignature: Restored v9.2 Layout (Charts/Metrics). integrated v9.10 AI Logic (T+/-7 Atomic + Monthly Summary) into 'AI Coach' tab.
+# Version: v10.1 (v9.2 Metrics Restored + AI Sub-tabs + Interaction Fixes)
+# CTOSignature: Restored exact v9.2 charts/metrics. Reorganized AI Coach into 3 sub-tabs. Fixed Swing AI workflow (History -> Analyze -> Save). Verified Saving logic.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -15,7 +15,7 @@ import time
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v10.0", layout="wide")
+st.set_page_config(page_title="投資戰情室 v10.1", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -45,12 +45,12 @@ if sh:
     try: ws_funds = sh.worksheet("Fund_Updates")
     except: st.error("❌ 找不到工作表 'Fund_Updates'"); st.stop()
     try: ws_history = sh.worksheet("Analysis_History")
-    except: ws_history = None # 若無此表，無法存月報，但不擋主程式
+    except: ws_history = None 
 else:
     st.error("❌ Google Sheet 連線失敗"); st.stop()
 
 # ==========================================
-# 2. 核心邏輯函數
+# 2. 核心邏輯函數 (Data & Math)
 # ==========================================
 
 @st.cache_data(ttl=3600) 
@@ -83,7 +83,6 @@ def get_stock_data(ticker):
     except: return 0.0, 0.0
 
 def get_historical_price_window(ticker, trade_date, window_days=7):
-    # T+/-7 Analysis
     try:
         t_date = pd.to_datetime(trade_date).tz_localize(None)
         start_d = (t_date - timedelta(days=window_days + 15)).strftime('%Y-%m-%d')
@@ -120,7 +119,6 @@ def load_data():
     try:
         records_data = ws_records.get_all_records()
         df = pd.DataFrame(records_data)
-        # Add RowIndex for write-back
         df['RowIndex'] = range(2, len(df) + 2)
     except: return pd.DataFrame(), pd.DataFrame(), 32.0
 
@@ -192,7 +190,6 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
     for ticker, data in portfolio.items():
         current_price = 0; market_value = 0
         if data['shares'] > 0.001:
-            # Fund Logic
             if data['type'] == '基金':
                 if not df_funds.empty and ticker in df_funds['Ticker'].values:
                     fund_row = df_funds[df_funds['Ticker'] == ticker].iloc[0]
@@ -201,12 +198,10 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
                     currency = 'USD'
                     if 'Currency' in df_funds.columns: currency = fund_row['Currency']
                     current_price = net_val if currency == 'TWD' else net_val * current_usd_rate
-                if current_price == 0 or pd.isna(current_price):
-                    current_price, _ = get_stock_data(ticker)
+                if current_price == 0 or pd.isna(current_price): current_price, _ = get_stock_data(ticker)
             else:
                 current_price, _ = get_stock_data(ticker)
             
-            # Last Resort
             if current_price == 0 or pd.isna(current_price):
                 current_price = data['total_cost'] / data['shares'] if data['shares'] > 0 else 0
                 
@@ -282,7 +277,7 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     return summary, period_df, pd.DataFrame()
 
 # ==========================================
-# 3. AI 教練與資料庫 (v9.10 Logic)
+# 3. AI 分析與資料庫存取
 # ==========================================
 def ask_gemini_coach(api_key, prompt_text):
     if not api_key: return "⚠️ 未偵測到 API Key"
@@ -413,7 +408,7 @@ def run_two_layer_swing_analysis(df_raw):
         update_atomic_reviews(atomic_updates)
 
 # ==========================================
-# 4. 圖表繪製 (v9.2 Style)
+# 4. 圖表繪製 (v9.2 Restored)
 # ==========================================
 def render_allocation_charts(full_portfolio_df):
     if full_portfolio_df.empty: return
@@ -457,6 +452,7 @@ def render_global_monthly_pnl_colored(trade_log_df, df_records):
 
 def render_metrics_cards(summary, mode):
     if not summary: return
+    # v9.2 Style Metrics
     if mode == "swing": 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("累積總損益", f"${summary['累積總損益']:,.0f}")
@@ -490,26 +486,37 @@ def render_metrics_cards(summary, mode):
         g5.metric("年化報酬率", xirr_display)
 
 def render_chart_swing(trade_log_df):
+    # v9.2 Swing Chart (Line + Points)
     if not trade_log_df.empty:
-        line = alt.Chart(trade_log_df.sort_values('Date')).mark_line(color='purple').encode(x='Date:T', y='cumsum_PnL:Q', tooltip=['Date'])
+        trade_log_df = trade_log_df.sort_values('Date')
         trade_log_df['cumsum_PnL'] = trade_log_df['PnL'].cumsum()
+        
+        line = alt.Chart(trade_log_df).mark_line(color='purple').encode(
+            x='Date:T', y=alt.Y('cumsum_PnL:Q', title='累積已實現損益'), tooltip=['Date', 'cumsum_PnL']
+        )
         points = alt.Chart(trade_log_df).mark_circle(size=60).encode(
             x='Date:T', y='PnL:Q', 
-            color=alt.condition(alt.datum.PnL > 0, alt.value("red"), alt.value("green")),
+            color=alt.condition(alt.datum.PnL > 0, alt.value("red"), alt.value("green")), # Red=Profit (TW Style)
             tooltip=['Date', 'Ticker', 'PnL']
         )
-        st.altair_chart((alt.Chart(trade_log_df).mark_line(color='purple').encode(x='Date:T', y='cumsum_PnL:Q') + points).interactive(), use_container_width=True)
+        st.altair_chart((line + points).interactive(), use_container_width=True)
+    else:
+        st.info("區間內無已實現交易")
 
 def render_chart_dividend_monthly(period_df):
+    # v9.2 Dividend Chart (Bar)
     div_df = period_df[period_df['Action'] == '領息'].copy()
     if not div_df.empty:
         div_df['Date'] = pd.to_datetime(div_df['Date'])
         chart = alt.Chart(div_df).mark_bar().encode(
             x=alt.X('Date:T', timeUnit='yearmonth', title='月份'), 
             y=alt.Y('Total_Amount:Q', title='股息金額'),
-            color=alt.Color('Ticker:N', title='投資標的')
+            color=alt.Color('Ticker:N', title='投資標的'),
+            tooltip=['Date', 'Ticker', 'Total_Amount']
         ).interactive()
         st.altair_chart(chart, use_container_width=True)
+    else:
+        st.info("區間內無領息紀錄")
 
 def render_inventory_management(full_portfolio_df, df_records, key_prefix):
     st.markdown("### 📦 庫存管理與交易登錄")
@@ -538,7 +545,6 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
         cols_show = ["代號", "種類", "佔比%", "庫存", "平均成本", "市價", "庫存現值", "帳面損益", "含息總報%", "策略"]
         st.dataframe(full_portfolio_df[cols_show], use_container_width=True, hide_index=True)
         
-        # Transaction Form
         with st.form(f"trans_form_{key_prefix}", clear_on_submit=True):
             st.markdown("**➕ 新增交易**")
             c1, c2, c3, c4 = st.columns(4)
@@ -551,7 +557,6 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
             with c5: d_total = st.number_input("總金額 (0自動算)", step=1000.0); d_note = st.text_input("備註")
             with c6: st.write(""); submitted = st.form_submit_button("送出交易")
             if submitted and d_ticker:
-                # Logic same as v9.2
                 db_strat = ",".join(d_strat)
                 if d_fee == 0 and d_action in ["買入", "賣出"]: d_fee = int(d_price * d_shares * 0.001425)
                 if d_total == 0:
@@ -561,7 +566,6 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
                 ws_records.append_row([str(d_date), d_ticker, d_type, db_strat, d_action, d_price, d_shares, d_fee, d_total, d_note])
                 st.success(f"已儲存 {d_ticker}"); st.cache_data.clear()
 
-        # Fund Update Form
         with st.form(f"fund_form_{key_prefix}", clear_on_submit=True):
             st.markdown("**💵 更新基金淨值**")
             f_tick = st.text_input("基金代號").upper()
@@ -572,14 +576,13 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
                     cell = ws_funds.find(f_tick)
                     ws_funds.update_cell(cell.row, 2, f_val)
                     ws_funds.update_cell(cell.row, 3, str(datetime.now().date()))
-                except:
-                    ws_funds.append_row([f_tick, f_val, str(datetime.now().date()), f_curr])
+                except: ws_funds.append_row([f_tick, f_val, str(datetime.now().date()), f_curr])
                 st.success("更新成功"); st.cache_data.clear()
 
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v10.0 (Perfect Merge)")
+st.title("📊 投資戰情室 v10.1 (Final Polish)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
@@ -606,7 +609,7 @@ if not selected_tickers:
         try: total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
         except: total_summary = None
 
-    # --- Tab 1: 全總覽 (UI v9.2) ---
+    # --- Tab 1: 全總覽 ---
     with t_all:
         if total_summary: render_metrics_cards(total_summary, "general")
         st.write(""); g1, g2 = st.columns([1, 2])
@@ -615,18 +618,18 @@ if not selected_tickers:
             with g2: render_global_monthly_pnl_colored(trade_log_df, df)
         st.divider(); render_inventory_management(full_portfolio_df, df, "overview")
         
-        # Display Saved Global Report
         gl_rep = get_last_report("Global")
         if gl_rep: st.markdown(f"### 📝 AI 全域診斷 ({gl_rep['Date']})\n{gl_rep['Content']}")
 
-    # --- Tab 2: 波段儀表板 (Display Only) ---
+    # --- Tab 2: 波段儀表板 (v9.2 Style + History) ---
     with t_swing:
         if total_summary: render_metrics_cards(total_summary, "swing")
+        # [Req 1] Restore v9.2 Charts
         st.markdown("##### 📈 交易損益曲線"); render_chart_swing(trade_log_df)
         st.divider()
-        st.markdown("### ⚡ 波段交易履歷 (按月歸檔)")
+        st.markdown("### ⚡ 波段交易履歷")
         
-        summaries = get_monthly_summaries() # Load stored AI summaries
+        summaries = get_monthly_summaries()
         swing_tickers = df[df['Strategy'].str.contains('波段', na=False)]['Ticker'].unique()
         
         for t in swing_tickers:
@@ -634,40 +637,42 @@ if not selected_tickers:
                 t_df = df[(df['Ticker'] == t) & (df['Strategy'].str.contains('波段', na=False))].copy()
                 t_df['YYYYMM'] = pd.to_datetime(t_df['Date']).dt.strftime('%Y-%m')
                 months = sorted(t_df['YYYYMM'].unique(), reverse=True)
-                
                 for m in months:
                     st.markdown(f"**🗓️ {m}**")
                     sum_key = f"Swing_Summary_{t}_{m}"
-                    if sum_key in summaries: st.info(summaries[sum_key]) # Show Summary
-                    
+                    if sum_key in summaries: st.info(summaries[sum_key])
                     m_trades = t_df[t_df['YYYYMM'] == m].sort_values('Date', ascending=False)
                     for _, row in m_trades.iterrows():
                         review = row['AI_Review'] if row['AI_Review'] else "(待分析)"
-                        st.markdown(f"- `{row['Date']}` {row['Action']} **${row['Price']}**: {review}") # Show Atomic
+                        st.markdown(f"- `{row['Date']}` {row['Action']} **${row['Price']}**: {review}")
                     st.divider()
 
-    # --- Tab 3: 存股月報 (Display Only) ---
+    # --- Tab 3: 存股月報 (v9.2 Style + History) ---
     with t_div:
         if total_summary: render_metrics_cards(total_summary, "dividend")
+        # [Req 1] Restore v9.2 Charts
         st.markdown("##### 💰 股息累積圖"); render_chart_dividend_monthly(df[df['Action']=='領息'])
         st.divider()
         
         div_rep = get_last_report("Dividend")
         if div_rep: st.markdown(f"### 📝 本月存股健檢 ({div_rep['Date']})\n{div_rep['Content']}")
-        else: st.info("尚無報告，請至 AI 教練分析。")
         
         st.divider(); render_inventory_management(full_portfolio_df, df, "div")
 
-    # --- Tab 4: AI 教練 (Command Center) ---
+    # --- Tab 4: AI 教練 (Req 2: Sub-tabs) ---
     with t_ai:
         st.markdown("### 🤖 AI 指揮中心")
-        st.caption("所有分析指令皆在此執行。結果會自動存檔並顯示於對應分頁。")
         
-        c1, c2, c3 = st.columns(3)
+        # [Req 2] Sub-tabs for AI
+        ai_t1, ai_t2, ai_t3 = st.tabs(["🌍 全域總覽", "⚡ 波段分析", "💰 存股健檢"])
         
-        with c1:
-            st.markdown("#### 🌍 1. 全域分析")
-            if st.button("執行全域診斷", use_container_width=True):
+        # --- AI Sub-tab 1: Global ---
+        with ai_t1:
+            # [Req 3/4] Show History First
+            last_gl = get_last_report("Global")
+            if last_gl: st.info(f"**上次分析 ({last_gl['Date']}):**\n\n{last_gl['Content']}")
+            
+            if st.button("🚀 執行全域分析", use_container_width=True):
                 top_holdings = full_portfolio_df.sort_values('庫存現值', ascending=False).head(5)
                 holdings_str = ""
                 for _, row in top_holdings.iterrows(): holdings_str += f"- {row['代號']}: {row['佔比%']}%\n"
@@ -676,17 +681,28 @@ if not selected_tickers:
                 if api_key:
                     with st.spinner("分析中..."):
                         advice = ask_gemini_coach(api_key, prompt)
-                        save_report("Global", advice)
-                        st.success("✅ 全域報告已更新！")
+                        # [Req 4] Explicit Save & Refresh
+                        save_analysis_history("Global", advice)
+                        st.success("✅ 分析完成並已存檔！")
+                        time.sleep(1); st.rerun()
 
-        with c2:
-            st.markdown("#### ⚡ 2. 波段自動分析 (雙層)")
-            if st.button("執行波段分析 (批次10筆)", use_container_width=True):
-                run_two_layer_swing_analysis(df) # Executes Atomic + Monthly logic
+        # --- AI Sub-tab 2: Swing (Req 3 Logic) ---
+        with ai_t2:
+            st.info("此處將逐筆檢視買賣點 (T±7) 並生成月報。")
+            
+            # Show existing monthly summaries logic could go here, but it's better in the main Swing tab.
+            # Here we focus on ACTION.
+            
+            if st.button("🚀 執行波段分析 (批次10筆)", use_container_width=True):
+                run_two_layer_swing_analysis(df) # Logic handles updates/saving internally
 
-        with c3:
-            st.markdown("#### 💰 3. 存股健檢")
-            if st.button("執行存股分析", use_container_width=True):
+        # --- AI Sub-tab 3: Dividend ---
+        with ai_t3:
+            # [Req 3/4] Show History First
+            last_div = get_last_report("Dividend")
+            if last_div: st.info(f"**上次分析 ({last_div['Date']}):**\n\n{last_div['Content']}")
+            
+            if st.button("🚀 執行存股分析", use_container_width=True):
                 div_stocks = full_portfolio_df[full_portfolio_df['策略'].str.contains('存股', na=False)]
                 if not div_stocks.empty:
                     stocks_str = ""
@@ -696,8 +712,10 @@ if not selected_tickers:
                     if api_key:
                         with st.spinner("分析中..."):
                             advice = ask_gemini_coach(api_key, prompt)
-                            save_report("Dividend", advice)
-                            st.success("✅ 存股報告已更新！")
+                            # [Req 4] Explicit Save & Refresh
+                            save_analysis_history("Dividend", advice)
+                            st.success("✅ 分析完成並已存檔！")
+                            time.sleep(1); st.rerun()
                 else: st.warning("無存股部位")
 
 else:
