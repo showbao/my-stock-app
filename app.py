@@ -1,5 +1,5 @@
-# Version: v10.3 (Metrics Customization + PnL Absolute Fix + AI History Logic)
-# CTOSignature: Enforced abs() on Sell amounts to fix PnL. Custom metrics for Swing/Div/Global. Moved Swing History to AI Coach tab. Implemented 'Load Last Report' logic.
+# Version: v10.4 (Strict Scoped Metrics + Absolute PnL Fix + AI Tab Reorg)
+# CTOSignature: Based on v10.2. Enforced abs() on Sales. Metrics strictly filtered by Strategy. Swing History moved to AI Tab.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -15,7 +15,7 @@ import time
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v10.3", layout="wide")
+st.set_page_config(page_title="投資戰情室 v10.4", layout="wide")
 
 ws_records = None
 ws_funds = None
@@ -87,14 +87,19 @@ def get_historical_price_window(ticker, trade_date, window_days=7):
         t_date = pd.to_datetime(trade_date).tz_localize(None)
         start_d = (t_date - timedelta(days=window_days + 15)).strftime('%Y-%m-%d')
         end_d = (t_date + timedelta(days=window_days + 15)).strftime('%Y-%m-%d')
+        
         real_ticker = fix_ticker_suffix(ticker)
         stock = yf.Ticker(real_ticker)
         hist = stock.history(start=start_d, end=end_d, auto_adjust=True)
+        
         if hist.empty: return None
         if hist.index.tz is not None: hist.index = hist.index.tz_localize(None)
+            
         mask_window = (hist.index >= (t_date - timedelta(days=window_days))) & (hist.index <= (t_date + timedelta(days=window_days)))
         window_df = hist.loc[mask_window]
+        
         if window_df.empty: return None
+        
         return {
             "window_high": window_df['High'].max(),
             "window_low": window_df['Low'].min(),
@@ -155,8 +160,9 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
     df = df.sort_values('Date')
     for _, row in df.iterrows():
         ticker = row['Ticker']; action = row['Action']; qty = row['Shares']
-        # [v10.3 FIX] Force absolute amount for Sell to prevent negative PnL issues
-        amount = abs(row['Total_Amount']) if action == '賣出' else row['Total_Amount']
+        # [v10.4 FIX] Force absolute amount for Sell/Buy to ensure correct arithmetic
+        amount_raw = row['Total_Amount']
+        amount = abs(amount_raw)
         
         date_txn = row['Date']
         typ = row['Type']; strat = str(row['Strategy'])
@@ -173,8 +179,10 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
             if p['shares'] > 0:
                 pct_sold = qty / p['shares']
                 cost_of_sold_shares = p['total_cost'] * pct_sold
-                # [v10.3 FIX] Revenue (positive) - Cost = PnL
+                
+                # [v10.4 FIX] Realized PnL = Revenue (Positive) - Cost
                 pnl = amount - cost_of_sold_shares 
+                
                 p['shares'] -= qty; p['total_cost'] -= cost_of_sold_shares
                 sell_price = (amount/qty) if qty>0 else 0
                 
@@ -222,30 +230,41 @@ def calculate_portfolio(df, df_funds, current_usd_rate):
     return pf_df, pd.DataFrame(trade_log)
 
 def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_portfolio_df, trade_log_df, strategy_filter=None):
+    # [v10.4] Scoped Calculation Logic
+    # 1. Base Filter (Date & Ticker)
     mask = (df['Date'] >= start_date) & (df['Date'] <= end_date)
     if selected_tickers: mask = mask & (df['Ticker'].isin(selected_tickers))
-    if strategy_filter: mask = mask & (df['Strategy'].str.contains(strategy_filter, na=False))
+    
+    # 2. Strategy Filter (Strict)
+    if strategy_filter: 
+        mask = mask & (df['Strategy'].str.contains(strategy_filter, na=False))
+        
     period_df = df[mask].copy()
     if period_df.empty: return None, pd.DataFrame(), pd.DataFrame()
 
-    total_dividend = period_df[period_df['Action'] == '領息']['Total_Amount'].sum()
-    total_buy = period_df[period_df['Action'] == '買入']['Total_Amount'].sum()
+    # 3. Calculate Aggregates based on FILTERED data
+    total_dividend = period_df[period_df['Action'] == '領息']['Total_Amount'].abs().sum()
+    total_buy = period_df[period_df['Action'] == '買入']['Total_Amount'].abs().sum()
     
+    # 4. Inventory Calculation (Must also be filtered by strategy)
     ending_inventory_value = 0; total_cost_basis = 0
     if end_date >= datetime.now().date() and not current_portfolio_df.empty:
         target_inv = current_portfolio_df
         if selected_tickers: target_inv = target_inv[target_inv['代號'].isin(selected_tickers)]
         if strategy_filter: target_inv = target_inv[target_inv['策略'].str.contains(strategy_filter, na=False)]
+        
         ending_inventory_value = target_inv['庫存現值'].sum()
         total_cost_basis = target_inv['總成本'].sum()
 
     total_unrealized = ending_inventory_value - total_cost_basis
     
+    # 5. Realized PnL (From trade_log which also needs filtering)
     realized_pnl_period = 0; win_rate = 0; realized_roi = 0; trade_count = 0
     if not trade_log_df.empty:
         t_mask = (trade_log_df['Date'] >= start_date) & (trade_log_df['Date'] <= end_date)
         if selected_tickers: t_mask = t_mask & (trade_log_df['Ticker'].isin(selected_tickers))
         if strategy_filter: t_mask = t_mask & (trade_log_df['Strategy'].str.contains(strategy_filter, na=False))
+        
         period_trades = trade_log_df[t_mask]
         
         if not period_trades.empty:
@@ -254,18 +273,18 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
             wins = period_trades[period_trades['PnL'] > 0]
             if trade_count > 0: win_rate = (len(wins) / trade_count) * 100
             
-            # [v10.3] Swing ROI = Total PnL / Total Cost of Sold Shares
             total_sold_cost = period_trades['CostBasis'].sum()
             if total_sold_cost > 0:
                 realized_roi = (realized_pnl_period / total_sold_cost) * 100
 
     total_profit = realized_pnl_period + total_unrealized + total_dividend
     
+    # 6. XIRR Calculation
     cash_flows = []
     for _, row in period_df.iterrows():
         d = row['Date']; amt = row['Total_Amount']; act = row['Action']
-        if act == '買入': cash_flows.append((d, -amt))
-        elif act in ['賣出', '領息']: cash_flows.append((d, abs(amt))) # Force positive cashflow
+        if act == '買入': cash_flows.append((d, -abs(amt)))
+        elif act in ['賣出', '領息']: cash_flows.append((d, abs(amt)))
     if ending_inventory_value > 0: cash_flows.append((end_date, ending_inventory_value))
     
     xirr_val = None
@@ -412,7 +431,7 @@ def run_swing_analysis_logic(df_raw, api_key):
     return atomic_updates, monthly_summaries, "\n\n".join(display_log)
 
 # ==========================================
-# 4. 圖表與數據顯示 (v10.3 Customized)
+# 4. 圖表與數據顯示 (v10.4 Metrics)
 # ==========================================
 def render_allocation_charts(full_portfolio_df):
     if full_portfolio_df.empty: return
@@ -456,7 +475,8 @@ def render_global_monthly_pnl_colored(trade_log_df, df_records):
 
 def render_metrics_cards(summary, mode):
     if not summary: return
-    # [v10.3 Fix] Customized Metrics per Tab
+    
+    # [v10.4 Fix] Exact Metrics Requirement
     
     # 1. Swing Dashboard (6 Items)
     if mode == "swing": 
@@ -590,7 +610,7 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v10.3 (Final)")
+st.title("📊 投資戰情室 v10.4 (Scoped)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
@@ -613,33 +633,35 @@ total_summary = None
 if not selected_tickers:
     t_all, t_swing, t_div, t_ai = st.tabs(["🌍 全總覽", "⚡ 波段儀表板", "💰 存股月報", "🤖 AI 教練"])
     
-    if not df.empty:
-        try: total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
-        except: total_summary = None
+    # 1. Global Calc
+    global_sum, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
 
     # --- Tab 1: 全總覽 ---
     with t_all:
-        if total_summary: render_metrics_cards(total_summary, "general")
+        if global_sum: render_metrics_cards(global_sum, "general")
         st.write(""); g1, g2 = st.columns([1, 2])
-        if total_summary:
+        if global_sum:
             with g1: render_allocation_charts(full_portfolio_df)
             with g2: render_global_monthly_pnl_colored(trade_log_df, df)
         st.divider(); render_inventory_management(full_portfolio_df, df, "overview")
 
-    # --- Tab 2: 波段儀表板 (No History, Clean) ---
+    # --- Tab 2: 波段儀表板 (Scoped) ---
     with t_swing:
-        if total_summary: render_metrics_cards(total_summary, "swing")
-        st.markdown("##### 📈 交易損益曲線"); render_chart_swing(trade_log_df)
+        # Calculate Scoped Metrics for Swing
+        swing_sum, _, swing_log_df = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, strategy_filter="波段")
+        if swing_sum: render_metrics_cards(swing_sum, "swing")
+        st.markdown("##### 📈 交易損益曲線"); render_chart_swing(swing_log_df)
         st.divider()
         st.markdown("### ⚡ 波段交易明細")
-        
-        # [v10.3] Only show Atomic trades list here, summaries moved to AI tab
-        swing_trades = trade_log_df[trade_log_df['Strategy'].str.contains('波段', na=False)].sort_values('Date', ascending=False)
-        st.dataframe(swing_trades[['Date', 'Ticker', 'Action', 'PnL', 'AI_Review']], use_container_width=True, hide_index=True)
+        if not swing_log_df.empty:
+            swing_log_df = swing_log_df.sort_values('Date', ascending=False)
+            st.dataframe(swing_log_df[['Date', 'Ticker', 'Action', 'PnL', 'AI_Review']], use_container_width=True, hide_index=True)
 
-    # --- Tab 3: 存股月報 ---
+    # --- Tab 3: 存股月報 (Scoped) ---
     with t_div:
-        if total_summary: render_metrics_cards(total_summary, "dividend")
+        # Calculate Scoped Metrics for Dividend
+        div_sum, div_period_df, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, strategy_filter="存股")
+        if div_sum: render_metrics_cards(div_sum, "dividend")
         st.markdown("##### 💰 股息累積圖"); render_chart_dividend_monthly(df[df['Action']=='領息'])
         st.divider(); render_inventory_management(full_portfolio_df, df, "div")
 
@@ -650,7 +672,6 @@ if not selected_tickers:
         
         # --- 1. Global AI ---
         with ai_t1:
-            # [v10.3] Auto-show last report
             last_gl = get_last_report("Global")
             if last_gl: st.info(f"**📝 上次分析 ({last_gl['Date']}):**\n\n{last_gl['Content']}")
             else: st.caption("尚無歷史報告")
@@ -659,7 +680,7 @@ if not selected_tickers:
                 top_holdings = full_portfolio_df.sort_values('庫存現值', ascending=False).head(5)
                 holdings_str = ""
                 for _, row in top_holdings.iterrows(): holdings_str += f"- {row['代號']}: {row['佔比%']}%\n"
-                prompt = f"全域資產診斷。總資產: {total_summary['庫存現值'] if total_summary else 0}。前五大: \n{holdings_str}。請用 :red[好]/:green[壞] (台股慣例) 給建議。"
+                prompt = f"全域資產診斷。總資產: {global_sum['庫存現值'] if global_sum else 0}。前五大: \n{holdings_str}。請用 :red[好]/:green[壞] (台股慣例) 給建議。"
                 api_key = st.secrets.get("gemini_api_key", None)
                 if api_key:
                     with st.spinner("分析中..."):
@@ -669,7 +690,7 @@ if not selected_tickers:
                             save_report("Global", advice)
                             st.success("✅ 已存檔！"); time.sleep(1); st.rerun()
 
-        # --- 2. Swing AI (Moved History Here) ---
+        # --- 2. Swing AI ---
         with ai_t2:
             st.markdown("#### 📅 歷史月報總結")
             summaries = get_monthly_summaries()
