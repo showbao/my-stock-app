@@ -1,5 +1,5 @@
-# Version: v9.7.2 (Final Fix: Restored Missing XIRR Logic)
-# CTOSignature: Fixed KeyError by restoring XIRR calculation in analyze_period_advanced. All features retained.
+# Version: v9.7.3 (Stability Fix: Detailed Connection Debug + Layout Variable Fix)
+# CTOSignature: Unpacked layout variables to prevent NameError. Added granular try-except blocks for Google Sheet connection debugging.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -15,7 +15,7 @@ import time
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v9.7.2", layout="wide")
+st.set_page_config(page_title="投資戰情室 v9.7.3", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -34,17 +34,34 @@ def connect_google_sheet():
         return None 
 
 sh = connect_google_sheet()
+
+# [v9.7.3 Fix] 獨立檢查每個工作表，提供精準錯誤訊息
+ws_records = None
+ws_funds = None
+ws_history = None
+
 if sh:
+    # 1. 嘗試連線 Records
     try:
         ws_records = sh.worksheet("Records")
-        ws_funds = sh.worksheet("Fund_Updates")
-        try: ws_history = sh.worksheet("Analysis_History")
-        except: ws_history = None
     except:
-        st.error("❌ 找不到必要工作表 'Records' 或 'Fund_Updates'。")
+        st.error("❌ 嚴重錯誤：找不到工作表 'Records'。請確認 Google Sheet 分頁名稱是否正確。")
         st.stop()
+        
+    # 2. 嘗試連線 Fund_Updates
+    try:
+        ws_funds = sh.worksheet("Fund_Updates")
+    except:
+        st.error("❌ 嚴重錯誤：找不到工作表 'Fund_Updates'。")
+        st.stop()
+        
+    # 3. 嘗試連線 Analysis_History (選用)
+    try:
+        ws_history = sh.worksheet("Analysis_History")
+    except:
+        ws_history = None # 這是一個選用功能，找不到沒關係，不擋流程
 else:
-    st.error("❌ Google Sheet 連線失敗。")
+    st.error("❌ Google Sheet 連線失敗 (API 認證錯誤或網路問題)。")
     st.stop()
 
 # ==========================================
@@ -219,7 +236,6 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
 
     total_dividend = period_df[period_df['Action'] == '領息']['Total_Amount'].sum()
     total_buy = period_df[period_df['Action'] == '買入']['Total_Amount'].sum()
-    
     ending_inventory_value = 0; total_cost_basis = 0
     if end_date >= datetime.now().date() and not current_portfolio_df.empty:
         target_inv = current_portfolio_df
@@ -242,7 +258,6 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
 
     total_profit = realized_pnl_period + total_unrealized + total_dividend
     
-    # [v9.7.2 FIX] Restore XIRR Logic
     cash_flows = []
     for _, row in period_df.iterrows():
         d = row['Date']; amt = row['Total_Amount']; act = row['Action']
@@ -257,7 +272,7 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
 
     summary = {
         "累積總損益": total_profit, "已領股息": total_dividend, "已實現損益": realized_pnl_period,
-        "未實現損益": total_unrealized, "勝率%": win_rate, "XIRR%": xirr_val, # Fix: Added XIRR
+        "未實現損益": total_unrealized, "勝率%": win_rate, "XIRR%": xirr_val, 
         "YoC%": yoc_period, "回本率%": payback_progress, "庫存現值": ending_inventory_value
     }
     return summary, period_df, pd.DataFrame()
@@ -651,7 +666,7 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v9.7.2 (Final Fix)")
+st.title("📊 投資戰情室 v9.7.3 (Stability Fix)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
@@ -669,7 +684,6 @@ with f3: selected_tickers = st.multiselect("投資標的", all_tickers, default=
 
 st.divider()
 
-# Force initialization of total_summary at the very top level
 total_summary = None
 
 if not selected_tickers:
@@ -684,9 +698,15 @@ if not selected_tickers:
     with t_all:
         if total_summary:
             render_metrics_cards(total_summary, "general")
-            st.write(""); g_col1, g_col2 = st.columns([1, 2])
-            with g_col1: render_allocation_charts(full_portfolio_df)
-            with g_col2: render_global_monthly_pnl_colored(trade_log_df, df)
+            # [v9.7.3 FIX] Split lines to ensure variables are defined safely
+            st.write("")
+            g_col1, g_col2 = st.columns([1, 2])
+            
+            with g_col1: 
+                render_allocation_charts(full_portfolio_df)
+            with g_col2: 
+                render_global_monthly_pnl_colored(trade_log_df, df)
+                
         st.divider(); render_inventory_management(full_portfolio_df, df, "overview")
         
         st.markdown("### 🤖 全域診斷報告")
