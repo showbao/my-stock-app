@@ -1,5 +1,5 @@
-# Version: v9.8.0 (Structural Fix: UI-First Architecture)
-# CTOSignature: Decoupled UI layout from Data logic. Columns are now initialized unconditionally before data processing to prevent NameError. Added XIRR overflow protection.
+# Version: v9.9 (AI Command Center + Reverse Chronological Timeline + Color Fix)
+# CTOSignature: Centralized all AI actions into 'AI Coach' tab. Refined Swing Dashboard to sort Newest->Oldest. Fixed markdown color syntax in prompts.
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -15,7 +15,7 @@ import time
 # ==========================================
 # 1. 系統設定與連線
 # ==========================================
-st.set_page_config(page_title="投資戰情室 v9.8.0", layout="wide")
+st.set_page_config(page_title="投資戰情室 v9.9", layout="wide")
 
 @st.cache_resource
 def connect_google_sheet():
@@ -41,20 +41,13 @@ ws_history = None
 
 if sh:
     try: ws_records = sh.worksheet("Records")
-    except: 
-        st.error("❌ 找不到工作表 'Records'。")
-        st.stop()
-        
+    except: st.error("❌ 找不到工作表 'Records'"); st.stop()
     try: ws_funds = sh.worksheet("Fund_Updates")
-    except: 
-        st.error("❌ 找不到工作表 'Fund_Updates'。")
-        st.stop()
-        
+    except: st.error("❌ 找不到工作表 'Fund_Updates'"); st.stop()
     try: ws_history = sh.worksheet("Analysis_History")
     except: ws_history = None
 else:
-    st.error("❌ Google Sheet 連線失敗。")
-    st.stop()
+    st.error("❌ Google Sheet 連線失敗"); st.stop()
 
 # ==========================================
 # 2. 核心邏輯函數
@@ -258,8 +251,6 @@ def analyze_period_advanced(df, start_date, end_date, selected_tickers, current_
     if ending_inventory_value > 0: cash_flows.append((end_date, ending_inventory_value))
     xirr_val = xirr(cash_flows)
     if xirr_val: xirr_val *= 100
-    
-    # [v9.8.0 Fix] Prevent XIRR Overflow for display
     if xirr_val and (xirr_val > 10000 or xirr_val < -10000): xirr_val = None
 
     yoc_period = (total_dividend / total_cost_basis * 100) if total_cost_basis > 0 else 0
@@ -285,7 +276,6 @@ def ask_gemini_coach(api_key, prompt_text):
         return response.text
     except Exception as e: return f"❌ AI 錯誤: {str(e)}"
 
-# --- Soft Lock Manager ---
 def get_last_report(report_type):
     if ws_history is None: return None
     try:
@@ -298,15 +288,12 @@ def get_last_report(report_type):
     return None
 
 def save_report(report_type, content):
-    if ws_history is None:
-        st.error("請先建立 'Analysis_History' 工作表。")
-        return
+    if ws_history is None: st.error("請先建立 'Analysis_History' 工作表。"); return
     try:
         ws_history.append_row([str(date.today()), report_type, content])
         st.cache_data.clear()
     except Exception as e: st.error(f"存檔失敗: {e}")
 
-# --- Consolidated Swing Logic (Sliding Window) ---
 def cluster_trades_by_gap(df_trades, gap_days=7):
     if df_trades.empty: return []
     df = df_trades.sort_values('Date').copy()
@@ -318,19 +305,16 @@ def cluster_trades_by_gap(df_trades, gap_days=7):
     
     for _, row in df.iterrows():
         curr_date = row['Date']
-        if last_date is None:
-            current_cluster.append(row)
+        if last_date is None: current_cluster.append(row)
         else:
             diff = (curr_date - last_date).days
-            if diff <= gap_days:
-                current_cluster.append(row)
+            if diff <= gap_days: current_cluster.append(row)
             else:
                 clusters.append(pd.DataFrame(current_cluster))
                 current_cluster = [row]
         last_date = curr_date
         
-    if current_cluster:
-        clusters.append(pd.DataFrame(current_cluster))
+    if current_cluster: clusters.append(pd.DataFrame(current_cluster))
     return clusters
 
 def update_google_sheet_review(updates_list):
@@ -341,9 +325,7 @@ def update_google_sheet_review(updates_list):
         if header != "AI_Review":
             cell = ws_records.find("AI_Review")
             if cell: ai_col_idx = cell.col
-            else: 
-                st.error("找不到 'AI_Review' 欄位。")
-                return
+            else: st.error("找不到 'AI_Review' 欄位。"); return
         with st.status("正在儲存...", expanded=True) as status:
             for row_idx, text in updates_list:
                 ws_records.update_cell(row_idx, ai_col_idx, text)
@@ -364,7 +346,6 @@ def run_consolidated_swing_analysis(df_raw, trade_log_df):
     if pending.empty: return None, [], []
 
     ticker_groups = pending.groupby('Ticker')
-    
     updates_to_commit = []
     ticker_summaries = {}
     processed_count = 0
@@ -372,7 +353,6 @@ def run_consolidated_swing_analysis(df_raw, trade_log_df):
     with st.status("🚀 正在執行智慧分群分析 (Gap=7天)...", expanded=True) as status:
         for ticker, t_df in ticker_groups:
             clusters = cluster_trades_by_gap(t_df, gap_days=7)
-            
             for cluster in clusters:
                 if processed_count >= 10: break 
                 
@@ -382,33 +362,27 @@ def run_consolidated_swing_analysis(df_raw, trade_log_df):
                 
                 tx_details = ""
                 row_indices = []
-                
                 for _, row in cluster.iterrows():
                     d = row['Date'].strftime('%Y-%m-%d'); act = row['Action']; px = row['Price']
                     row_indices.append(row['RowIndex'])
-                    
                     context, _, is_mature = get_historical_price_window(ticker, d)
                     if context:
                         if act == '買入':
-                            low = context['window_low']
-                            dist = ((px - low)/low * 100)
+                            low = context['window_low']; dist = ((px - low)/low * 100)
                             tx_details += f"- {d} 買入 {px}元 (區間最低 {low}, 差距 +{dist:.1f}%)\n"
                         elif act == '賣出':
-                            high = context['window_high']
-                            missed = ((high - px)/px * 100)
+                            high = context['window_high']; missed = ((high - px)/px * 100)
                             tx_details += f"- {d} 賣出 {px}元 (區間最高 {high}, 賣飛 {missed:.1f}%)\n"
                     else:
                         tx_details += f"- {d} {act} {px}元 (數據不足)\n"
 
                 prompt = f"""
                 你是一位交易教練。請針對以下「同一波段」的操作(差距7天內)進行綜合點評。
-                
                 【交易數據: {ticker}】
                 {tx_details}
-                
                 【任務】
                 1. 給出一段「綜合評語」(繁體中文, 60字內)。
-                2. 使用 :green[...] 或 :red[...] 標示。
+                2. 使用 Markdown 顏色語法 :green[...] (好評) 或 :red[...] (負評/警示)。(絕對不要使用 HTML 語法)
                 3. 重點：這波操作的節奏與進出場時機。
                 """
                 
@@ -420,13 +394,9 @@ def run_consolidated_swing_analysis(df_raw, trade_log_df):
                 
                 group_key = f"{ticker}_{start_date}"
                 ticker_summaries[group_key] = review
-                
                 processed_count += 1
-            
             if processed_count >= 10: break
-            
         status.update(label="智慧分析完成！", state="complete")
-        
     return updates_to_commit, ticker_summaries, pending
 
 @st.dialog("🌍 全域總覽 (月報模式)")
@@ -462,7 +432,7 @@ def dialog_global_analysis(full_portfolio_df, summary_metrics):
         (全域分析 Prompt...)
         資產現值: {summary_metrics['庫存現值']}, 現金: {cash_balance}, 現金水位: {cash_ratio:.1f}%.
         前五大: {holdings_str}
-        請給予資產配置建議 (Markdown格式, 紅色警示).
+        請給予資產配置建議。請使用 :red[...] (警示) 和 :green[...] (好評) 語法，不要使用 HTML。
         """
         with st.spinner("AI 分析中..."):
             advice = ask_gemini_coach(api_key, prompt)
@@ -471,16 +441,12 @@ def dialog_global_analysis(full_portfolio_df, summary_metrics):
 
 def run_dividend_soft_lock(full_portfolio_df):
     last_report = get_last_report("Dividend")
-    
     if last_report:
         last_date = datetime.strptime(last_report['Date'], "%Y-%m-%d").date()
         if (date.today() - last_date).days < 30:
             st.info(f"📅 顯示上月報告 ({last_report['Date']}) - 未滿 30 天")
             st.markdown(last_report['Content'])
-            if st.button("⚠️ 強制更新 (消耗 API)"):
-                pass 
-            else:
-                return 
+            return 
 
     api_key = st.secrets.get("gemini_api_key", None)
     if not api_key: return
@@ -492,8 +458,10 @@ def run_dividend_soft_lock(full_portfolio_df):
     for _, row in div_stocks.iterrows():
         stocks_str += f"{row['代號']}: YoC {row['成本殖利率%']}%\n"
 
-    prompt = f"存股健檢 (Markdown, 紅色警示): \n{stocks_str}"
-    
+    prompt = f"""
+    存股健檢。請使用 :red[...] (警示/低YoC) 和 :green[...] (好評/高YoC) 語法。禁止 HTML。
+    數據: \n{stocks_str}
+    """
     with st.spinner("分析存股..."):
         advice = ask_gemini_coach(api_key, prompt)
         save_report("Dividend", advice)
@@ -587,6 +555,48 @@ def render_strategy_view(df, start_date, end_date, selected_tickers, strategy_fi
     else:
         st.info("此區間無相關數據")
 
+def render_allocation_charts(full_portfolio_df):
+    if full_portfolio_df.empty: return
+    st.markdown("#### 🥧 資產配置 - 持股佔比")
+    base = alt.Chart(full_portfolio_df).encode(theta=alt.Theta("庫存現值", stack=True))
+    pie = base.mark_arc(outerRadius=120, innerRadius=60).encode(
+        color=alt.Color("代號", title="投資標的", sort=alt.EncodingSortField(field="庫存現值", order="descending")),
+        order=alt.Order("庫存現值", sort="descending"),
+        tooltip=["代號", "庫存現值", "佔比%", "策略", "種類"]
+    )
+    st.altair_chart(pie, use_container_width=True)
+
+def render_global_monthly_pnl_colored(trade_log_df, df_records):
+    pnl_df = pd.DataFrame()
+    if not trade_log_df.empty:
+        pnl_df = trade_log_df[['Date', 'PnL', 'Type']].copy()
+        pnl_df['Date'] = pd.to_datetime(pnl_df['Date'])
+        pnl_df['Month'] = pnl_df['Date'].dt.strftime('%Y-%m')
+    div_df = df_records[df_records['Action'] == '領息'][['Date', 'Total_Amount', 'Type']].copy()
+    if not div_df.empty:
+        div_df['Date'] = pd.to_datetime(div_df['Date'])
+        div_df['Month'] = div_df['Date'].dt.strftime('%Y-%m')
+        div_df = div_df.rename(columns={'Total_Amount': 'PnL'})
+    combined = pd.concat([pnl_df, div_df], ignore_index=True)
+    if combined.empty: return
+    combined['Type'] = combined['Type'].fillna('股票') 
+    combined = combined.sort_values('Month')
+    grouped = combined.groupby(['Month', 'Type'])['PnL'].sum().reset_index()
+    grouped['Date'] = pd.to_datetime(grouped['Month'])
+    grouped = grouped.sort_values('Date')
+    grouped['Cumulative_PnL'] = grouped.groupby('Type')['PnL'].cumsum()
+    domain_end = datetime.now().date()
+    domain_start = domain_end - timedelta(days=365)
+    st.markdown("#### 🌊 累積已實現損益 (含股息) - 財富堆疊圖")
+    chart = alt.Chart(grouped).mark_area(opacity=0.7).encode(
+        x=alt.X('Date:T', timeUnit='yearmonth', title='月份', 
+                scale=alt.Scale(domain=[pd.to_datetime(domain_start), pd.to_datetime(domain_end)])),
+        y=alt.Y('Cumulative_PnL:Q', title='累積已實現獲利 ($)', stack=True), 
+        color=alt.Color('Type:N', title='資產種類', scale=alt.Scale(domain=['股票', '基金'], range=['#1f77b4', '#ff7f0e'])),
+        tooltip=[alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 'Type', 'Cumulative_PnL', 'PnL']
+    ).properties(height=350).interactive()
+    st.altair_chart(chart, use_container_width=True)
+
 def render_inventory_management(full_portfolio_df, df_records, key_prefix):
     st.markdown("### 📦 庫存管理與交易登錄")
     if not full_portfolio_df.empty:
@@ -661,52 +671,10 @@ def render_inventory_management(full_portfolio_df, df_records, key_prefix):
                     st.success("更新成功"); st.cache_data.clear()
     else: st.info("尚無資料，請先新增第一筆交易。")
 
-def render_allocation_charts(full_portfolio_df):
-    if full_portfolio_df.empty: return
-    st.markdown("#### 🥧 資產配置 - 持股佔比")
-    base = alt.Chart(full_portfolio_df).encode(theta=alt.Theta("庫存現值", stack=True))
-    pie = base.mark_arc(outerRadius=120, innerRadius=60).encode(
-        color=alt.Color("代號", title="投資標的", sort=alt.EncodingSortField(field="庫存現值", order="descending")),
-        order=alt.Order("庫存現值", sort="descending"),
-        tooltip=["代號", "庫存現值", "佔比%", "策略", "種類"]
-    )
-    st.altair_chart(pie, use_container_width=True)
-
-def render_global_monthly_pnl_colored(trade_log_df, df_records):
-    pnl_df = pd.DataFrame()
-    if not trade_log_df.empty:
-        pnl_df = trade_log_df[['Date', 'PnL', 'Type']].copy()
-        pnl_df['Date'] = pd.to_datetime(pnl_df['Date'])
-        pnl_df['Month'] = pnl_df['Date'].dt.strftime('%Y-%m')
-    div_df = df_records[df_records['Action'] == '領息'][['Date', 'Total_Amount', 'Type']].copy()
-    if not div_df.empty:
-        div_df['Date'] = pd.to_datetime(div_df['Date'])
-        div_df['Month'] = div_df['Date'].dt.strftime('%Y-%m')
-        div_df = div_df.rename(columns={'Total_Amount': 'PnL'})
-    combined = pd.concat([pnl_df, div_df], ignore_index=True)
-    if combined.empty: return
-    combined['Type'] = combined['Type'].fillna('股票') 
-    combined = combined.sort_values('Month')
-    grouped = combined.groupby(['Month', 'Type'])['PnL'].sum().reset_index()
-    grouped['Date'] = pd.to_datetime(grouped['Month'])
-    grouped = grouped.sort_values('Date')
-    grouped['Cumulative_PnL'] = grouped.groupby('Type')['PnL'].cumsum()
-    domain_end = datetime.now().date()
-    domain_start = domain_end - timedelta(days=365)
-    st.markdown("#### 🌊 累積已實現損益 (含股息) - 財富堆疊圖")
-    chart = alt.Chart(grouped).mark_area(opacity=0.7).encode(
-        x=alt.X('Date:T', timeUnit='yearmonth', title='月份', 
-                scale=alt.Scale(domain=[pd.to_datetime(domain_start), pd.to_datetime(domain_end)])),
-        y=alt.Y('Cumulative_PnL:Q', title='累積已實現獲利 ($)', stack=True), 
-        color=alt.Color('Type:N', title='資產種類', scale=alt.Scale(domain=['股票', '基金'], range=['#1f77b4', '#ff7f0e'])),
-        tooltip=[alt.Tooltip('Date', timeUnit='yearmonth', title='月份'), 'Type', 'Cumulative_PnL', 'PnL']
-    ).properties(height=350).interactive()
-    st.altair_chart(chart, use_container_width=True)
-
 # ==========================================
 # 5. 主程式佈局
 # ==========================================
-st.title("📊 投資戰情室 v9.8.0 (Final Architecture)")
+st.title("📊 投資戰情室 v9.9 (AI Command Center)")
 
 df, df_funds, usd_rate = load_data()
 if df.empty: st.warning("目前無任何交易紀錄"); st.stop()
@@ -727,9 +695,8 @@ st.divider()
 total_summary = None
 
 if not selected_tickers:
-    t_all, t_swing, t_div, t_ai = st.tabs(["🌍 全總覽", "⚡ 波段儀表板", "💰 存股月報", "🤖 AI 設定"])
+    t_all, t_swing, t_div, t_ai = st.tabs(["🌍 全總覽", "⚡ 波段儀表板", "💰 存股月報", "🤖 AI 教練"])
     
-    # [v9.8.0] Pre-calculate Summary
     if not df.empty:
         try:
             total_summary, _, _ = analyze_period_advanced(df, analysis_start, analysis_end, None, full_portfolio_df, trade_log_df, None)
@@ -740,11 +707,9 @@ if not selected_tickers:
         if total_summary:
             render_metrics_cards(total_summary, "general")
         
-        # [v9.8.0 FIX] Define Columns Unconditionally (UI First)
         st.write("")
         g_col1, g_col2 = st.columns([1, 2])
         
-        # [v9.8.0 FIX] Populate Columns only if data exists
         if total_summary:
             with g_col1: render_allocation_charts(full_portfolio_df)
             with g_col2: render_global_monthly_pnl_colored(trade_log_df, df)
@@ -752,30 +717,10 @@ if not selected_tickers:
             st.info("無足夠數據顯示圖表")
                 
         st.divider(); render_inventory_management(full_portfolio_df, df, "overview")
-        
-        st.markdown("### 🤖 全域診斷報告")
-        if st.button("開啟全域分析視窗"):
-            dialog_global_analysis(full_portfolio_df, total_summary)
     
     with t_swing:
-        st.markdown("### ⚡ 波段交易覆盤 (智慧分群版)")
-        st.caption("系統會將「7天內」的連續交易視為同一波操作，進行合併分析。")
-        
-        col_act, col_info = st.columns([1, 3])
-        if col_act.button("🚀 執行批次分析 (10組)", use_container_width=True):
-            updates, summaries, _ = run_consolidated_swing_analysis(df, trade_log_df)
-            st.session_state['swing_updates'] = updates
-            st.session_state['swing_summaries'] = summaries
-        
-        if st.session_state.get('swing_updates'):
-            st.success(f"已分析完成！請確認後存檔。")
-            if st.button("💾 全部存檔 (寫入 Google Sheet)", use_container_width=True):
-                update_google_sheet_review(st.session_state['swing_updates'])
-                del st.session_state['swing_updates']
-                del st.session_state['swing_summaries']
-                st.rerun()
-
-        st.divider()
+        st.markdown("### ⚡ 波段交易儀表板 (Level 3)")
+        st.caption("顯示所有波段操作紀錄，按時間倒序排列 (Newest First)。")
         
         swing_tickers = df[df['Strategy'].str.contains('波段', na=False)]['Ticker'].unique()
         
@@ -791,8 +736,9 @@ if not selected_tickers:
             
             with st.expander(f"📌 {t}", expanded=has_new_summary):
                 if has_new_summary:
-                    st.info(f"💡 **本波操作總評**：{ticker_summary_text}")
+                    st.info(f"💡 **AI 綜合點評**：{ticker_summary_text}")
                 
+                # [v9.9 FIX] Sort descending (Newest first)
                 t_history = df[
                     (df['Ticker'] == t) & 
                     (df['Strategy'].str.contains('波段', na=False))
@@ -808,11 +754,13 @@ if not selected_tickers:
                                 is_pending = True
                     
                     if review:
-                        msg = f"**{row['Date']} {row['Action']} {row['Price']}**: {review}"
-                        if is_pending: st.warning(msg)
-                        else: st.markdown(msg)
+                        # Timeline Style
+                        st.markdown(f"""
+                        * **{row['Date']}** | `{row['Action']}` | ${row['Price']} 
+                            > {review}
+                        """)
                     else:
-                        st.caption(f"{row['Date']} {row['Action']} {row['Price']} (尚未分析)")
+                        st.markdown(f"* **{row['Date']}** | `{row['Action']}` | ${row['Price']} *(未分析)*")
 
     with t_div:
         run_dividend_soft_lock(full_portfolio_df)
@@ -820,7 +768,46 @@ if not selected_tickers:
         render_inventory_management(full_portfolio_df, df, "div")
     
     with t_ai:
-        st.info("此區保留給未來的 AI 設定功能。")
+        st.markdown("### 🤖 AI 指揮中心")
+        st.info("請在此處執行各類分析，確認結果後存檔，即可在對應的分頁查看報告。")
+        
+        c1, c2, c3 = st.columns(3)
+        
+        with c1:
+            st.markdown("#### 🌍 全域資產分析")
+            if st.button("啟動全域分析", use_container_width=True):
+                dialog_global_analysis(full_portfolio_df, total_summary)
+        
+        with c2:
+            st.markdown("#### ⚡ 波段批次覆盤")
+            if st.button("執行波段分析 (10筆)", use_container_width=True):
+                updates, summaries, _ = run_consolidated_swing_analysis(df, trade_log_df)
+                st.session_state['swing_updates'] = updates
+                st.session_state['swing_summaries'] = summaries
+            
+            if st.session_state.get('swing_updates'):
+                st.success(f"已分析完成！")
+                if st.button("💾 存檔波段評語", use_container_width=True):
+                    update_google_sheet_review(st.session_state['swing_updates'])
+                    del st.session_state['swing_updates']
+                    del st.session_state['swing_summaries']
+                    st.rerun()
+                    
+        with c3:
+            st.markdown("#### 💰 存股體質健檢")
+            if st.button("執行存股分析", use_container_width=True):
+                div_stocks = full_portfolio_df[full_portfolio_df['策略'].str.contains('存股', na=False)]
+                if not div_stocks.empty:
+                    stocks_str = ""
+                    for _, row in div_stocks.iterrows():
+                        stocks_str += f"{row['代號']}: YoC {row['成本殖利率%']}%\n"
+                    prompt = f"存股健檢。使用 :red[...] 和 :green[...]。禁止 HTML。\n{stocks_str}"
+                    with st.spinner("分析中..."):
+                        advice = ask_gemini_coach(api_key, prompt)
+                        save_report("Dividend", advice)
+                        st.success("✅ 分析完成並已存檔！請至「存股月報」分頁查看。")
+                else:
+                    st.warning("無存股部位")
         
 else:
     ticker_tabs = st.tabs([f"🔍 {t}" for t in selected_tickers])
