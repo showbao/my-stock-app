@@ -1,9 +1,5 @@
 streamlit
-pandas
-yfinance
 gspread
-oauth2client
-scipy
-altair
-numpy
-google-generativeai>=0.7.2
+google-auth
+google-auth-oauthlib
+pandas
