@@ -199,10 +199,11 @@ if page == "首頁":
 
 if page == "新增交易":
 
+    # 顯示成功訊息（如果有）
     if st.session_state.toast:
         st.success(st.session_state.toast)
-        st.session_state.toast = NoneNone
-    
+        st.session_state.toast = None
+
     action = st.selectbox("交易類型", ["buy", "sell", "dividend", "initial"])
     asset_type = st.selectbox("資產類型", ["stock", "fund"])
     symbol = st.text_input("代號")
@@ -220,15 +221,17 @@ if page == "新增交易":
 
         if action == "initial":
 
-            amount_twd = qty * price
             if qty <= 0:
                 st.error("initial 數量必須大於 0")
                 st.stop()
+
+            amount_twd = qty * price
 
             # initial 日期檢查
             same = transactions_df[
                 transactions_df["symbol"].astype(str).str.upper() == symbol
             ]
+
             if not same.empty:
                 same_dates = pd.to_datetime(
                     same["date"], errors="coerce"
@@ -265,6 +268,7 @@ if page == "新增交易":
             amount_twd
         ]
 
-            sheet.worksheet("transactions").append_row(new_row)
-            st.session_state.toast = "新增成功"
-            st.rerun()
+        sheet.worksheet("transactions").append_row(new_row)
+
+        st.session_state.toast = "新增成功"
+        st.rerun()
