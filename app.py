@@ -151,6 +151,9 @@ page = st.sidebar.radio("選單", ["首頁", "新增交易"])
 # 首頁
 # =========================
 
+if "toast" not in st.session_state:
+    st.session_state.toast = None
+
 if page == "首頁":
 
     tab_all, tab_stock, tab_fund = st.tabs(["全部", "股票", "基金"])
@@ -196,6 +199,10 @@ if page == "首頁":
 
 if page == "新增交易":
 
+    if st.session_state.toast:
+    st.success(st.session_state.toast)
+    st.session_state.toast = None
+    
     action = st.selectbox("交易類型", ["buy", "sell", "dividend", "initial"])
     asset_type = st.selectbox("資產類型", ["stock", "fund"])
     symbol = st.text_input("代號")
@@ -258,6 +265,6 @@ if page == "新增交易":
             amount_twd
         ]
 
-        sheet.worksheet("transactions").append_row(new_row)
-        st.success("新增成功")
-        st.rerun()
+            sheet.worksheet("transactions").append_row(new_row)
+            st.session_state.toast = "新增成功"
+            st.rerun()
