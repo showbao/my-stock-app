@@ -200,8 +200,8 @@ if page == "首頁":
 if page == "新增交易":
 
     if st.session_state.toast:
-    st.success(st.session_state.toast)
-    st.session_state.toast = None
+        st.success(st.session_state.toast)
+        st.session_state.toast = NoneNone
     
     action = st.selectbox("交易類型", ["buy", "sell", "dividend", "initial"])
     asset_type = st.selectbox("資產類型", ["stock", "fund"])
