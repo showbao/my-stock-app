@@ -14,9 +14,11 @@ st.set_page_config(page_title="投資MVP", layout="wide")
 
 @st.cache_resource
 def connect_sheet():
-    creds_dict = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
+    # ✅ 你的 Secrets 是拆欄位：[gcp_service_account]
+    creds_info = dict(st.secrets["gcp_service_account"])
+
     creds = Credentials.from_service_account_info(
-        creds_dict,
+        creds_info,
         scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
     client = gspread.authorize(creds)
