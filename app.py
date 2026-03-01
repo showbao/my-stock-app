@@ -76,7 +76,17 @@ def clean_symbol(symbol, asset_type):
     if asset_type == "fund" and not symbol.startswith("F_"):
         symbol = "F_" + symbol
     return symbol
-
+    
+def to_number(x):
+    # 把 None / 空白 / "1,000" / " " 之類轉成可用數字
+    if x is None:
+        return 0.0
+    s = str(x).strip()
+    if s == "":
+        return 0.0
+    s = s.replace(",", "")  # 讓 1,000 變 1000
+    return float(s)
+    
 def calculate_metrics(df, prices_df):
     if df.empty:
         return 0, 0, 0, 0, 0
@@ -86,8 +96,8 @@ def calculate_metrics(df, prices_df):
     for _, row in df.iterrows():
         symbol = row["symbol"]
         action = row["action"]
-        qty = float(row["qty"])
-        amount_twd = float(row["amount_twd"])
+        qty = to_number(row.get("qty"))
+        amount_twd = to_number(row.get("amount_twd"))
 
         if symbol not in result:
             result[symbol] = {"qty": 0, "cost": 0, "dividend": 0}
@@ -111,13 +121,13 @@ def calculate_metrics(df, prices_df):
 
         price_row = prices_df[prices_df["symbol"] == symbol]
         if not price_row.empty:
-            price = float(price_row.iloc[0]["price"])
+            price = to_number(price_row.iloc[0].get("price"))
             currency = price_row.iloc[0]["currency"]
             value = data["qty"] * price
 
             if currency == "USD":
                 fx_row = prices_df[prices_df["symbol"] == "USD_TWD"]
-                fx = float(fx_row.iloc[0]["price"])
+                fx = to_number(fx_row.iloc[0].get("price"))
                 value *= fx
         else:
             value = 0
