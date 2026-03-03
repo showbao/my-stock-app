@@ -336,6 +336,16 @@ def kpi_card(title, value_text, sub_text=""):
         unsafe_allow_html=True
     )
 
+# KPI 以 grid 方式排版時使用：回傳 HTML 字串（不直接 st.markdown）
+def kpi_card_html(title, value_text, sub_text=""):
+    return f"""
+    <div class=\"kpi-card\">
+      <div class=\"kpi-title\">{title}</div>
+      <div class=\"kpi-value\">{value_text}</div>
+      {f'<div class="kpi-sub">{sub_text}</div>' if sub_text else ''}
+    </div>
+    """
+
 def hero_card(title, value_text, sub_text=""):
     st.markdown(
         f"""
