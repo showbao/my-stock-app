@@ -338,13 +338,16 @@ def kpi_card(title, value_text, sub_text=""):
 
 # KPI 以 grid 方式排版時使用：回傳 HTML 字串（不直接 st.markdown）
 def kpi_card_html(title, value_text, sub_text=""):
-    return f"""
-    <div class=\"kpi-card\">
-      <div class=\"kpi-title\">{title}</div>
-      <div class=\"kpi-value\">{value_text}</div>
-      {f'<div class="kpi-sub">{sub_text}</div>' if sub_text else ''}
-    </div>
-    """
+    # 注意：markdown 會把「前面有空格的行」當成程式碼區塊。
+    # 所以這裡刻意不加任何前置空白，避免 HTML 被顯示成文字。
+    sub = f'<div class="kpi-sub">{sub_text}</div>' if sub_text else ""
+    return (
+        f'<div class="kpi-card">'
+        f'<div class="kpi-title">{title}</div>'
+        f'<div class="kpi-value">{value_text}</div>'
+        f'{sub}'
+        f'</div>'
+    )
 
 def hero_card(title, value_text, sub_text=""):
     st.markdown(
