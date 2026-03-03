@@ -79,6 +79,30 @@ def clean_symbol(symbol, asset_type):
     if asset_type == "fund" and not symbol.startswith("F_"):
         symbol = "F_" + symbol
     return symbol
+def get_current_qty(transactions_df, symbol, asset_type):
+    # 計算某個資產目前持有數量（只看 buy / sell / initial；dividend 不影響 qty）
+    df = transactions_df.copy()
+    df["symbol_norm"] = df["symbol"].astype(str).apply(lambda x: clean_symbol(x, asset_type))
+    target = df[df["symbol_norm"] == symbol]
+
+    if target.empty:
+        return 0.0
+
+    qty = 0.0
+    for _, row in target.iterrows():
+        action = str(row.get("action", "")).strip().lower()
+        q = row.get("qty", 0)
+        try:
+            q = float(str(q).replace(",", "").strip()) if str(q).strip() != "" else 0.0
+        except:
+            q = 0.0
+
+        if action in ["buy", "initial"]:
+            qty += q
+        elif action == "sell":
+            qty -= q
+
+    return qty
     
 def to_number(x):
     # 把 None / 空白 / "1,000" / " " 之類轉成可用數字
@@ -273,6 +297,12 @@ if page == "新增交易":
             if abs(qty * price * fx_rate - amount_twd) > 1:
                 st.error("金額驗證錯誤")
                 st.stop()
+            # ✅ sell 超過持有：直接擋下，不寫入
+            if action == "sell":
+                current_qty = get_current_qty(transactions_df, symbol, asset_type)
+                if qty > current_qty:
+                    st.error(f"賣出數量({qty}) 超過目前持有({current_qty})，不允許送出")
+                    st.stop()
 
         new_row = [
             str(datetime.now().timestamp()),
