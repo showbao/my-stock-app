@@ -277,22 +277,22 @@ if page == "新增交易":
 
     # ✅ 送出按鈕一定要存在，而且所有「寫入」都只能在按鈕裡
         btn_text = "🔄 寫入中..." if st.session_state.processing else st.session_state.btn_label
-   if st.button(st.session_state.btn_label, disabled=st.session_state.processing):
+    if st.button(st.session_state.btn_label, disabled=st.session_state.processing):
 
-    st.session_state.processing = True
-    st.session_state.btn_label = "🔄 寫入中..."
+        st.session_state.processing = True
+        st.session_state.btn_label = "🔄 寫入中..."
 
-    try:
-        # 原本檢查 + append_row
+        try:
+            # 原本檢查 + append_row
 
-        saved_at = datetime.now().strftime("%H:%M")
-        st.session_state.btn_label = f"✅ 已存檔 ({saved_at})"
+            saved_at = datetime.now().strftime("%H:%M")
+            st.session_state.btn_label = f"✅ 已存檔 ({saved_at})"
 
-    except Exception as e:
-        st.error(str(e))
-        st.session_state.btn_label = "送出"
+        except Exception as e:
+            st.error(str(e))
+            st.session_state.btn_label = "送出"
 
-    st.session_state.processing = False
+        st.session_state.processing = False
 
         symbol = clean_symbol(symbol_input, asset_type)
 
