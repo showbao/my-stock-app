@@ -224,65 +224,62 @@ if page == "新增交易":
 
     fx_rate = st.number_input("匯率", min_value=0.0) if currency == "USD" else 1.0
 
-    if st.button("送出"):
+    symbol = clean_symbol(symbol, asset_type)
 
-        symbol = clean_symbol(symbol, asset_type)
+if action == "initial":
+    if qty <= 0:
+        st.error("initial 數量必須大於 0")
+        st.stop()
 
-        if action == "initial":
+    # initial：amount_twd 先用 qty * price（先不加新欄位）
+    amount_twd = qty * price
 
-            if qty <= 0:
-                st.error("initial 數量必須大於 0")
-                st.stop()
+    # initial 日期檢查（用清理後的 symbol 比對）
+    same = transactions_df[
+        transactions_df["symbol"].astype(str).apply(lambda x: clean_symbol(x, asset_type)) == symbol
+    ]
 
-            amount_twd = qty * price
+    if not same.empty:
+        same_dates = pd.to_datetime(
+            same["date"].astype(str).str.strip().str.replace("/", "-").str.replace(".", "-"),
+            errors="coerce"
+        ).dropna().dt.date
 
-# initial 日期檢查：必須早於同資產其他交易
-same = transactions_df[
-    transactions_df["symbol"].astype(str).str.strip().str.upper() == symbol
+        if len(same_dates) == 0:
+            st.error("舊資料的 date 格式無法判斷，請先把 transactions 的 date 全部改成 YYYY-MM-DD")
+            st.stop()
+
+        if any(d <= tx_date for d in same_dates.tolist()):
+            st.error("initial 日期必須早於此資產的其他交易日期")
+            st.stop()
+
+else:
+    if currency == "USD" and fx_rate == 0:
+        st.error("USD 必須填匯率")
+        st.stop()
+
+    amount_original = qty * price
+    amount_twd = amount_original * fx_rate
+
+    if abs(qty * price * fx_rate - amount_twd) > 1:
+        st.error("金額驗證錯誤")
+        st.stop()
+
+new_row = [
+    str(datetime.now().timestamp()),
+    str(tx_date),
+    action,
+    asset_type,
+    symbol,
+    strategy,
+    currency,
+    fx_rate,
+    qty,
+    price,
+    qty * price,
+    amount_twd
 ]
 
-# 有同資產舊交易才需要檢查
-if not same.empty:
-    same_dates = parse_date_series(same["date"]).dropna()
-
-    # ✅ 吃不到日期就直接擋（避免規格被繞過）
-    if len(same_dates) == 0:
-        st.error("舊資料的 date 格式無法判斷，請先把 transactions 的 date 全部改成 YYYY-MM-DD")
-        st.stop()
-
-    # ✅ 只要存在任何一筆日期 <= 你選的日期，就代表 initial 不是最早 → 擋下來
-    if any(d <= tx_date for d in same_dates.tolist()):
-        st.error("initial 日期必須早於此資產的其他交易日期")
-        st.stop()
-
-        else:
-            if currency == "USD" and fx_rate == 0:
-                st.error("USD 必須填匯率")
-                st.stop()
-
-            amount_original = qty * price
-            amount_twd = amount_original * fx_rate
-
-            if abs(qty * price * fx_rate - amount_twd) > 1:
-                st.error("金額驗證錯誤")
-                st.stop()
-
-        new_row = [
-            str(datetime.now().timestamp()),
-            str(tx_date),
-            action,
-            asset_type,
-            symbol,
-            strategy,
-            currency,
-            fx_rate,
-            qty,
-            price,
-            qty * price,
-            amount_twd
-        ]
-
-        sheet.worksheet("transactions").append_row(new_row)
-
-        st.session_state.toast = "新增成功"
-        st.rerun()
+sheet.worksheet("transactions").append_row(new_row)
+st.session_state.toast = "新增成功"
+st.rerun()
