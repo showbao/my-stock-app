@@ -114,6 +114,25 @@ def to_number(x):
     s = s.replace(",", "")  # 讓 1,000 變 1000
     return float(s)
 
+def fmt_money(n):
+    try:
+        return f"{float(n):,.0f}"
+    except:
+        return "—"
+
+def fmt_signed_money(n):
+    try:
+        n = float(n)
+        sign = "+" if n > 0 else ""
+        return f"{sign}{n:,.0f}"
+    except:
+        return "—"
+
+def kpi_card(title, value_text):
+    with st.container(border=True):
+        st.caption(title)
+        st.markdown(f"### {value_text}")
+
 def parse_date_series(series):
     s = series.astype(str).str.strip()
     s = s.str.replace("/", "-", regex=False).str.replace(".", "-", regex=False)
@@ -211,11 +230,12 @@ if page == "首頁":
             st.write("總報酬率：—")
         else:
             invest, value, divi, profit, rate = metrics
-            st.write(f"總投入：{round(invest,2)}")
-            st.write(f"目前市值：{round(value,2)}")
-            st.write(f"已領息：{round(divi,2)}")
-            st.write(f"總報酬：{round(profit,2)}")
-            st.write(f"總報酬率：{round(rate,2)}%")
+
+            kpi_card("總投入", fmt_money(invest))
+            kpi_card("目前市值", fmt_money(value))
+            kpi_card("已領息", fmt_money(divi))
+            kpi_card("總報酬", fmt_signed_money(profit))
+            kpi_card("總報酬率", f"{'+' if rate>0 else ''}{rate:.2f}%")
 
     with tab_all:
         show_metrics(all_metrics)
@@ -230,26 +250,49 @@ if page == "首頁":
 # 新增交易
 # =========================
 
+    def mark_dirty():
+        st.session_state.dirty = True
+        st.session_state.btn_label = "送出"
+
 if page == "新增交易":
-
+    st.session_state.setdefault("processing", False)
+    st.session_state.setdefault("btn_label", "送出")
+    st.session_state.setdefault("dirty", False)  # 只要欄位改過就會變 True
+    
     # 顯示成功訊息（如果有）
-    if "toast" in st.session_state and st.session_state.toast:
-        st.success(st.session_state.toast)
-        st.session_state.toast = None
 
-    action = st.selectbox("交易類型", ["buy", "sell", "dividend", "initial"])
-    asset_type = st.selectbox("資產類型", ["stock", "fund"])
-    symbol_input = st.text_input("代號")
-    strategy = st.text_input("策略")
-    currency = st.selectbox("幣別", ["TWD", "USD"])
-    qty = st.number_input("數量", min_value=0.0)
-    price = st.number_input("單價", min_value=0.0)
-    tx_date = st.date_input("日期")
+    action = st.selectbox("交易類型", ["buy", "sell", "dividend", "initial"], key="in_action", on_change=mark_dirty)
+    asset_type = st.selectbox("資產類型", ["stock", "fund"], key="in_asset_type", on_change=mark_dirty)
+    symbol_input = st.text_input("代號", key="in_symbol", on_change=mark_dirty)
+    strategy = st.text_input("策略", key="in_strategy", on_change=mark_dirty)
+    currency = st.selectbox("幣別", ["TWD", "USD"], key="in_currency", on_change=mark_dirty)
+    qty = st.number_input("數量", min_value=0.0, key="in_qty", on_change=mark_dirty)
+    price = st.number_input("單價", min_value=0.0, key="in_price", on_change=mark_dirty)
+    tx_date = st.date_input("日期", key="in_date", on_change=mark_dirty)
 
-    fx_rate = st.number_input("匯率", min_value=0.0) if currency == "USD" else 1.0
+    if currency == "TWD":
+        fx_rate = st.number_input("匯率", value=1.0, disabled=True)
+    else:
+        fx_rate = st.number_input("匯率", min_value=0.0, key="in_fx_rate", on_change=mark_dirty)
 
     # ✅ 送出按鈕一定要存在，而且所有「寫入」都只能在按鈕裡
-    if st.button("送出"):
+        btn_text = "🔄 寫入中..." if st.session_state.processing else st.session_state.btn_label
+   if st.button(st.session_state.btn_label, disabled=st.session_state.processing):
+
+    st.session_state.processing = True
+    st.session_state.btn_label = "🔄 寫入中..."
+
+    try:
+        # 原本檢查 + append_row
+
+        saved_at = datetime.now().strftime("%H:%M")
+        st.session_state.btn_label = f"✅ 已存檔 ({saved_at})"
+
+    except Exception as e:
+        st.error(str(e))
+        st.session_state.btn_label = "送出"
+
+    st.session_state.processing = False
 
         symbol = clean_symbol(symbol_input, asset_type)
 
