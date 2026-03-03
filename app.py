@@ -250,14 +250,14 @@ if page == "首頁":
 # 新增交易
 # =========================
 
-    def mark_dirty():
-        st.session_state.dirty = True
-        st.session_state.btn_label = "送出"
-
 if page == "新增交易":
     st.session_state.setdefault("processing", False)
     st.session_state.setdefault("btn_label", "送出")
     st.session_state.setdefault("dirty", False)  # 只要欄位改過就會變 True
+
+    def mark_dirty():
+        st.session_state.dirty = True
+        st.session_state.btn_label = "送出"
     
     # 顯示成功訊息（如果有）
 
