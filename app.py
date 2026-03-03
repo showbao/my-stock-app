@@ -11,6 +11,7 @@ from datetime import datetime, date
 st.set_page_config(page_title="投資儀表板", layout="wide")
 
 DASHBOARD_CSS = """
+
 <style>
 /* 版面留白 */
 .block-container { padding-top: 1.1rem; padding-bottom: 2.0rem; }
@@ -68,6 +69,17 @@ div.stButton > button { border-radius: 12px; }
 
 /* Alert 圓角 */
 div[data-testid="stAlert"] { border-radius: 12px; }
+
+/* KPI 佈局：手機一欄，桌機兩欄 */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+@media (min-width: 900px) {
+  .kpi-grid { grid-template-columns: 1fr 1fr; }
+}
 </style>
 """
 st.markdown(DASHBOARD_CSS, unsafe_allow_html=True)
@@ -220,6 +232,73 @@ def calculate_metrics(df, prices_df):
     rate = (total_profit / total_invest * 100) if total_invest != 0 else 0.0
     return total_invest, total_value, total_dividend, total_profit, rate
 
+
+
+def top_holdings_table(df_tx: pd.DataFrame, prices_df: pd.DataFrame, top_n: int = 3) -> pd.DataFrame:
+    """回傳持有市值前 N 名（只顯示用）"""
+    if df_tx is None or df_tx.empty:
+        return pd.DataFrame(columns=["代碼", "持有數量", "價格", "幣別", "市值(TWD)"])
+
+    tx = df_tx.copy()
+    tx["qty"] = tx.get("qty", 0).apply(to_number)
+    tx["action"] = tx.get("action", "").astype(str).str.strip().str.lower()
+    tx["symbol"] = tx.get("symbol", "").astype(str)
+
+    # 計算目前持有 qty（buy/initial 加，sell 減）
+    pos = {}
+    for _, r in tx.iterrows():
+        sym = r["symbol"]
+        act = r["action"]
+        q = float(r["qty"])
+        if sym not in pos:
+            pos[sym] = 0.0
+        if act in ["buy", "initial"]:
+            pos[sym] += q
+        elif act == "sell":
+            pos[sym] -= q
+
+    # 取得 USD_TWD
+    fx_row = prices_df[prices_df["symbol"] == "USD_TWD"] if prices_df is not None and not prices_df.empty else pd.DataFrame()
+    usd_twd = to_number(fx_row.iloc[0].get("price")) if not fx_row.empty else 0.0
+
+    rows = []
+    for sym, q in pos.items():
+        if q <= 0:
+            continue
+
+        p_row = prices_df[prices_df["symbol"] == sym] if prices_df is not None and not prices_df.empty else pd.DataFrame()
+        if p_row.empty:
+            price = 0.0
+            ccy = ""
+        else:
+            price = to_number(p_row.iloc[0].get("price"))
+            ccy = str(p_row.iloc[0].get("currency", "")).strip().upper()
+
+        mv = q * price
+        if ccy == "USD":
+            mv *= usd_twd
+
+        rows.append({
+            "代碼": sym,
+            "持有數量": q,
+            "價格": price,
+            "幣別": ccy,
+            "市值(TWD)": mv
+        })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=["代碼", "持有數量", "價格", "幣別", "市值(TWD)"])
+
+    out = out.sort_values("市值(TWD)", ascending=False).head(top_n)
+
+    # 顯示用格式
+    out["持有數量"] = out["持有數量"].map(lambda x: f"{x:,.4f}".rstrip("0").rstrip("."))
+    out["價格"] = out["價格"].map(lambda x: f"{x:,.4f}".rstrip("0").rstrip("."))
+    out["市值(TWD)"] = out["市值(TWD)"].map(lambda x: f"{x:,.0f}")
+
+    return out
+
 # =========================
 # 顯示用（儀表板風）
 # =========================
@@ -315,45 +394,108 @@ if page == "首頁":
     stock_metrics = calculate_metrics(stock_df, prices_df)
     fund_metrics = calculate_metrics(fund_df, prices_df)
 
-    def render_dashboard(metrics, label):
+    def render_dashboard(metrics, label, df_for_table):
+
+
         if metrics is None:
+
+
             st.error("資料異常：出現負持股")
+
+
             hero_card("目前市值（TWD）", "—", "請先確認交易資料是否正確")
-            kpi_card("總投入", "—")
-            kpi_card("已領息", "—")
-            kpi_card("總報酬", "—")
-            kpi_card("總報酬率", "—")
+
+
+            st.markdown(f'<div class="kpi-grid">{"".join([kpi_card_html("總投入","—"), kpi_card_html("已領息","—"), kpi_card_html("總報酬","—"), kpi_card_html("總報酬率","—")])}</div>', unsafe_allow_html=True)
+
+
             return
+
+
 
         invest, value, divi, profit, rate = metrics
 
+
+
         # Hero：市值
+
+
         sub_parts = []
+
+
         if prices_updated:
+
+
             sub_parts.append(f"價格更新：{prices_updated}")
+
+
         if fx is not None:
+
+
             fx_part = f"USD_TWD：{fx:.4f}"
+
+
             if fx_updated:
+
+
                 fx_part += f"（{fx_updated}）"
+
+
             sub_parts.append(fx_part)
 
+
+
         hero_sub = " ｜ ".join(sub_parts) if sub_parts else ""
+
+
         hero_card(f"{label}｜目前市值（TWD）", fmt_money(value), hero_sub)
 
-        # KPI：單欄卡片（手機也安全）
-        kpi_card("總投入", fmt_money(invest))
-        kpi_card("已領息", fmt_money(divi))
-        kpi_card("總報酬", fmt_signed_money(profit))
-        kpi_card("總報酬率", fmt_signed_pct(rate))
+
+
+        # KPI：手機一欄、桌機兩欄
+
+
+        kpis_html = "".join([
+
+
+            kpi_card_html("總投入", fmt_money(invest)),
+
+
+            kpi_card_html("已領息", fmt_money(divi)),
+
+
+            kpi_card_html("總報酬", fmt_signed_money(profit)),
+
+
+            kpi_card_html("總報酬率", fmt_signed_pct(rate)),
+
+
+        ])
+
+
+        st.markdown(f'<div class="kpi-grid">{kpis_html}</div>', unsafe_allow_html=True)
+
+
+
+        # 持有前三名（市值）
+
+
+        st.markdown("#### 持有前三名（市值）")
+
+
+        top3 = top_holdings_table(df_for_table, prices_df, top_n=3)
+
+
+        st.dataframe(top3, use_container_width=True, hide_index=True)
 
     with tab_all:
-        render_dashboard(all_metrics, "全部")
+        render_dashboard(all_metrics, "全部", all_df)
 
     with tab_stock:
-        render_dashboard(stock_metrics, "股票")
+        render_dashboard(stock_metrics, "股票", stock_df)
 
     with tab_fund:
-        render_dashboard(fund_metrics, "基金")
+        render_dashboard(fund_metrics, "基金", fund_df)
 
 # =========================
 # 新增交易（儀表板風 + 防連點 + 回彈 + 局部清空）
