@@ -209,13 +209,13 @@ if page == "首頁":
 if page == "新增交易":
 
     # 顯示成功訊息（如果有）
-    if st.session_state.toast:
+    if "toast" in st.session_state and st.session_state.toast:
         st.success(st.session_state.toast)
         st.session_state.toast = None
 
     action = st.selectbox("交易類型", ["buy", "sell", "dividend", "initial"])
     asset_type = st.selectbox("資產類型", ["stock", "fund"])
-    symbol = st.text_input("代號")
+    symbol_input = st.text_input("代號")
     strategy = st.text_input("策略")
     currency = st.selectbox("幣別", ["TWD", "USD"])
     qty = st.number_input("數量", min_value=0.0)
@@ -224,62 +224,71 @@ if page == "新增交易":
 
     fx_rate = st.number_input("匯率", min_value=0.0) if currency == "USD" else 1.0
 
-    symbol = clean_symbol(symbol, asset_type)
+    # ✅ 送出按鈕一定要存在，而且所有「寫入」都只能在按鈕裡
+    if st.button("送出"):
 
-    if action == "initial":
-        if qty <= 0:
-            st.error("initial 數量必須大於 0")
-        st.    stop()
+        symbol = clean_symbol(symbol_input, asset_type)
 
-        # initial：amount_twd 先用 qty * price（先不加新欄位）
-        amount_twd = qty * price
+        # ✅ 基本防呆：代號必填（避免空 symbol 被寫入）
+        if symbol == "":
+            st.error("代號不可空白")
+            st.stop()
 
-        # initial 日期檢查（用清理後的 symbol 比對）
-        same = transactions_df[
-            transactions_df["symbol"].astype(str).apply(lambda x: clean_symbol(x, asset_type)) == symbol
+        if action == "initial":
+
+            if qty <= 0:
+                st.error("initial 數量必須大於 0")
+                st.stop()
+
+            amount_twd = qty * price
+
+            # initial 日期檢查：必須早於同資產其他交易
+            same = transactions_df[
+                transactions_df["symbol"].astype(str).apply(lambda x: clean_symbol(x, asset_type)) == symbol
+            ]
+
+            if not same.empty:
+                same_dates = pd.to_datetime(
+                    same["date"].astype(str).str.strip().str.replace("/", "-").str.replace(".", "-"),
+                    errors="coerce"
+                ).dropna().dt.date
+
+                if len(same_dates) == 0:
+                    st.error("舊資料的 date 格式無法判斷，請先把 transactions 的 date 全部改成 YYYY-MM-DD")
+                    st.stop()
+
+                if any(d <= tx_date for d in same_dates.tolist()):
+                    st.error("initial 日期必須早於此資產的其他交易日期")
+                    st.stop()
+
+        else:
+            if currency == "USD" and fx_rate == 0:
+                st.error("USD 必須填匯率")
+                st.stop()
+
+            amount_original = qty * price
+            amount_twd = amount_original * fx_rate
+
+            # 後端驗證容差 ±1 元
+            if abs(qty * price * fx_rate - amount_twd) > 1:
+                st.error("金額驗證錯誤")
+                st.stop()
+
+        new_row = [
+            str(datetime.now().timestamp()),
+            str(tx_date),
+            action,
+            asset_type,
+            symbol,
+            strategy,
+            currency,
+            fx_rate,
+            qty,
+            price,
+            qty * price,
+            amount_twd
         ]
 
-        if not same.empty:
-            same_dates = pd.to_datetime(
-                same["date"].astype(str).str.strip().str.replace("/", "-").str.replace(".", "-"),
-                errors="coerce"
-            ).dropna().dt.date
-
-            if len(same_dates) == 0:
-                st.error("舊資料的 date 格式無法判斷，請先把 transactions 的 date 全部改成 YYYY-MM-DD")
-                st.stop()
-
-            if any(d <= tx_date for d in same_dates.tolist()):
-                st.error("initial 日期必須早於此資產的其他交易日期")
-                st.stop()
-
-    else:
-        if currency == "USD" and fx_rate == 0:
-            st.error("USD 必須填匯率")
-            st.stop()
-
-        amount_original = qty * price
-        amount_twd = amount_original * fx_rate
-
-        if abs(qty * price * fx_rate - amount_twd) > 1:
-            st.error("金額驗證錯誤")
-            st.stop()
-
-    new_row = [
-        str(datetime.now().timestamp()),
-        str(tx_date),
-        action,
-        asset_type,
-        symbol,
-        strategy,
-        currency,
-        fx_rate,
-        qty,
-        price,
-        qty * price,
-        amount_twd
-    ]
-
-    sheet.worksheet("transactions").append_row(new_row)
-    st.session_state.toast = "新增成功"
-    st.rerun()
+        sheet.worksheet("transactions").append_row(new_row)
+        st.session_state.toast = "新增成功"
+        st.rerun()
