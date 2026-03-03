@@ -1,299 +1,274 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-import time
-from google.oauth2 import service_account
-from gspread_pandas import Spread, Client
-import plotly.graph_objects as go
+import gspread
+from google.oauth2.service_account import Credentials
+import json
+import re
+from datetime import datetime
 
-# --- 頁面配置 ---
-st.set_page_config(page_title="個人投資記錄", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="投資MVP", layout="wide")
 
-# --- 自定義 CSS (現代化 UI & 隱藏側邊欄 & 懸浮按鈕) ---
-st.markdown("""
-    <style>
-    /* 隱藏側邊欄 */
-    [data-testid="stSidebar"] {display: none;}
+# =========================
+# 連線 Google Sheet
+# =========================
+
+@st.cache_resource
+def connect_sheet():
+    # ✅ 你的 Secrets 是拆欄位：[gcp_service_account]
+    creds_info = dict(st.secrets["gcp_service_account"])
+
+    creds = Credentials.from_service_account_info(
+        creds_info,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    client = gspread.authorize(creds)
+    return client.open_by_key(st.secrets["SHEET_ID"])
+
+sheet = connect_sheet()
+
+def load_data():
+    transactions = pd.DataFrame(sheet.worksheet("transactions").get_all_records())
+    prices = pd.DataFrame(sheet.worksheet("prices").get_all_records())
+    allowed = pd.DataFrame(sheet.worksheet("settings_allowed_emails").get_all_records())
+    return transactions, prices, allowed
+
+transactions_df, prices_df, allowed_df = load_data()
+
+# =========================
+# Google 登入
+# =========================
+
+def login_screen():
+    st.title("投資記錄 MVP")
+    st.write("請使用 Google 登入")
+    if st.button("用 Google 登入"):
+        st.login()
+
+if not st.user.is_logged_in:
+    login_screen()
+    st.stop()
+
+user_email = (st.user.email or "").strip().lower()
+
+allowed_emails = set(
+    allowed_df.get("email", pd.Series(dtype=str))
+    .astype(str)
+    .str.strip()
+    .str.lower()
+    .tolist()
+)
+
+if user_email not in allowed_emails:
+    st.error("無權限")
+    st.button("登出", on_click=st.logout)
+    st.stop()
+
+st.sidebar.success(f"登入：{user_email}")
+st.sidebar.button("登出", on_click=st.logout)
+
+# =========================
+# 工具函式
+# =========================
+
+def clean_symbol(symbol, asset_type):
+    symbol = symbol.strip().upper()
+    symbol = re.sub(r"[^A-Z0-9_]", "", symbol)
+    if asset_type == "fund" and not symbol.startswith("F_"):
+        symbol = "F_" + symbol
+    return symbol
     
-    /* 全域背景與字體 */
-    .stApp {
-        background-color: #f8f9fa;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    }
-
-    /* 數據卡片設計 */
-    .metric-card {
-        background: white;
-        padding: 20px;
-        border-radius: 15px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-        border: 1px solid #eee;
-        text-align: center;
-    }
-    .metric-label { color: #666; font-size: 0.9rem; margin-bottom: 5px; }
-    .metric-value { color: #1f1f1f; font-size: 1.5rem; font-weight: 700; }
+def to_number(x):
+    # 把 None / 空白 / "1,000" / " " 之類轉成可用數字
+    if x is None:
+        return 0.0
+    s = str(x).strip()
+    if s == "":
+        return 0.0
+    s = s.replace(",", "")  # 讓 1,000 變 1000
+    return float(s)
     
-    /* 右下角大圓加號按鈕 (FAB) */
-    .fab-container {
-        position: fixed;
-        bottom: 30px;
-        right: 30px;
-        z-index: 1000;
-    }
-    .fab-button {
-        width: 60px;
-        height: 60px;
-        background-color: #007bff;
-        border-radius: 50%;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        color: white;
-        font-size: 30px;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.3);
-        cursor: pointer;
-        border: none;
-        transition: transform 0.2s;
-    }
-    .fab-button:hover { transform: scale(1.1); }
+def calculate_metrics(df, prices_df):
+    if df.empty:
+        return 0, 0, 0, 0, 0
 
-    /* 適配手機 */
-    @media (max-width: 600px) {
-        .metric-value { font-size: 1.2rem; }
-    }
-    </style>
-    """, unsafe_allow_stdio=True)
+    result = {}
 
-# --- 初始化 Google Sheets 連線 ---
-# 在 Streamlit Secrets 中設定連線資訊
-def get_gsheet_connection():
-    try:
-        # 使用 streamlit 的 secrets
-        creds_dict = st.secrets["gcp_service_account"]
-        scope = ['https://www.googleapis.com/auth/spreadsheets']
-        creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=scope)
-        # 這裡簡化流程，實際建議用 gspread 或 st.connection
-        return creds
-    except Exception as e:
-        st.error(f"無法連線至 Google Sheets: {e}")
-        return None
+    for _, row in df.iterrows():
+        symbol = row["symbol"]
+        action = row["action"]
+        qty = to_number(row.get("qty"))
+        amount_twd = to_number(row.get("amount_twd"))
 
-# --- 核心計算邏輯 (平均成本法) ---
-def calculate_portfolio(df_tx, df_prices, filter_strategy=None, filter_symbols=None, start_date=None, end_date=None):
-    if df_tx.empty:
-        return None, "尚未有交易紀錄"
+        if symbol not in result:
+            result[symbol] = {"qty": 0, "cost": 0, "dividend": 0}
 
-    # 基礎篩選
-    df = df_tx.copy()
-    df['date'] = pd.to_datetime(df['date'])
-    if start_date: df = df[df['date'] >= pd.to_datetime(start_date)]
-    if end_date: df = df[df['date'] <= pd.to_datetime(end_date)]
-    if filter_strategy and filter_strategy != "全部":
-        df = df[df['strategy'] == filter_strategy]
-    if filter_symbols:
-        df = df[df['symbol'].isin(filter_symbols)]
+        if action in ["buy", "initial"]:
+            result[symbol]["qty"] += qty
+            result[symbol]["cost"] += amount_twd
+        elif action == "sell":
+            result[symbol]["qty"] -= qty
+            result[symbol]["cost"] -= amount_twd
+        elif action == "dividend":
+            result[symbol]["dividend"] += amount_twd
 
-    # 依 Symbol 排序計算
-    df = df.sort_values(['symbol', 'date'])
-    
-    results = {}
+    total_invest = 0
+    total_value = 0
     total_dividend = 0
-    
-    for symbol, group in df.groupby('symbol'):
-        holding_qty = 0
-        total_cost_twd = 0
-        realized_pnl = 0
-        accumulated_dividend = 0
-        
-        # 取得現價與匯率
-        current_price = df_prices.loc[df_prices['symbol'] == symbol, 'price'].values[0] if symbol in df_prices['symbol'].values else 0
-        usd_twd = df_prices.loc[df_prices['symbol'] == 'USD_TWD', 'price'].values[0] if 'USD_TWD' in df_prices['symbol'].values else 32.0
-        asset_type = df_prices.loc[df_prices['symbol'] == symbol, 'asset_type'].values[0] if symbol in df_prices['symbol'].values else 'stock'
 
-        for _, row in group.iterrows():
-            action = row['action']
-            qty = row['qty']
-            amt_twd = row['amount_twd']
-            
-            if action == 'initial' or action == 'buy':
-                total_cost_twd += amt_twd
-                holding_qty += qty
-            elif action == 'sell':
-                if qty > holding_qty:
-                    return None, f"資料異常：{symbol} 持股不足以賣出"
-                # 平均成本賣出 (不影響單位成本，但減少總成本)
-                avg_cost = total_cost_twd / holding_qty if holding_qty > 0 else 0
-                total_cost_twd -= (avg_cost * qty)
-                holding_qty -= qty
-            elif action == 'dividend':
-                accumulated_dividend += amt_twd
-        
-        if holding_qty < 0:
-            return None, f"資料異常：{symbol} 持股為負"
-            
-        # 計算市值 (美股需換算)
-        market_val = holding_qty * current_price
-        if symbol.endswith('_USD') or (hasattr(row, 'currency') and row['currency'] == 'USD'):
-            market_val *= usd_twd
-            
-        results[symbol] = {
-            'holding_qty': holding_qty,
-            'total_cost': total_cost_twd,
-            'market_value': market_val,
-            'dividend': accumulated_dividend,
-            'asset_type': asset_type
-        }
-        total_dividend += accumulated_dividend
+    for symbol, data in result.items():
+        if data["qty"] < 0:
+            return None
 
-    # 彙整五大指標
-    total_invested = sum(v['total_cost'] for v in results.values())
-    current_market_value = sum(v['market_value'] for v in results.values())
-    total_pnl = current_market_value - total_invested + total_dividend
-    roi = (total_pnl / total_invested) if total_invested > 0 else 0
-    
-    return {
-        'invested': total_invested,
-        'market_value': current_market_value,
-        'dividend': total_dividend,
-        'pnl': total_pnl,
-        'roi': roi
-    }, None
+        price_row = prices_df[prices_df["symbol"] == symbol]
+        if not price_row.empty:
+            price = to_number(price_row.iloc[0].get("price"))
+            currency = price_row.iloc[0]["currency"]
+            value = data["qty"] * price
 
-# --- UI 元件：新增交易彈窗 ---
-@st.dialog("新增交易紀錄")
-def add_transaction_dialog():
-    with st.form("tx_form", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        asset_type = col1.selectbox("資產類型", ["stock", "fund"])
-        action = col2.selectbox("行為", ["buy", "sell", "dividend", "initial"])
-        
-        date = st.date_input("日期", datetime.now())
-        symbol = st.text_input("標的代碼 (Symbol)").strip().upper()
-        strategy = st.selectbox("策略", ["存股", "波段"])
-        
-        currency = st.radio("幣別", ["TWD", "USD"], horizontal=True)
-        fx_rate = 1.0
-        if currency == "USD":
-            fx_rate = st.number_input("匯率 (USD/TWD)", value=32.0, format="%.2f")
-            
-        qty = 0.0
-        price = 0.0
-        amt_orig = 0.0
-        
-        if action in ['buy', 'sell', 'initial']:
-            qty = st.number_input("股數/單位數", min_value=0.0, step=1.0)
-            if action == 'initial':
-                amt_twd_input = st.number_input("總投入金額 (台幣)", min_value=0.0)
-            else:
-                price = st.number_input("單價", min_value=0.0)
-        else: # dividend
-            amt_orig = st.number_input("配息金額", min_value=0.0)
+            if currency == "USD":
+                fx_row = prices_df[prices_df["symbol"] == "USD_TWD"]
+                fx = to_number(fx_row.iloc[0].get("price"))
+                value *= fx
+        else:
+            value = 0
 
-        submitted = st.form_submit_button("確認送出", use_container_width=True)
-        if submitted:
-            # 這裡執行寫入邏輯與驗證
-            st.success(f"{symbol} 交易已記錄！")
-            st.rerun()
+        total_invest += data["cost"]
+        total_value += value
+        total_dividend += data["dividend"]
 
-# --- 主程式控制 ---
-def main():
-    # 1. 登入驗證 (簡化模擬)
-    if 'authenticated' not in st.session_state:
-        st.title("🔐 投資管理系統登入")
-        password = st.text_input("請輸入訪問密碼", type="password")
-        if st.button("登入"):
-            if password == st.secrets["app_password"]: # 密碼存於 Secrets
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("密碼錯誤")
-        return
+    total_profit = total_value + total_dividend - total_invest
+    rate = (total_profit / total_invest * 100) if total_invest != 0 else 0
 
-    # 2. 頂部標題與刷新
-    col_t, col_r = st.columns([5, 1])
-    col_t.title("📈 我的投資總覽")
-    if col_r.button("🔄 刷新價格"):
-        # 模擬冷卻邏輯
-        st.toast("價格已更新！")
+    return total_invest, total_value, total_dividend, total_profit, rate
 
-    # 3. 篩選區
-    with st.container():
-        c1, c2, c3 = st.columns([2, 2, 4])
-        date_range = c1.date_input("日期區間", [datetime.now() - timedelta(days=365), datetime.now()])
-        strategy_filter = c2.selectbox("投資策略", ["全部", "存股", "波段"])
-        
-        # 模擬標的篩選 Chips
-        all_symbols = ["2330", "0050", "AAPL", "NVDA", "VOO"]
-        selected_symbols = c3.multiselect("選擇標的 (可多選)", all_symbols)
+# =========================
+# 頁面
+# =========================
 
-    # 4. 數據分頁 (Tabs)
-    tab_all, tab_stock, tab_fund = st.tabs(["💎 全部資產", "🏦 股票", "📊 基金"])
+page = st.sidebar.radio("選單", ["首頁", "新增交易"])
 
-    # 模擬資料計算 (正式開發請替換為 calculate_portfolio 讀取 Sheets 資料)
-    metrics = {
-        'invested': 1000000,
-        'market_value': 1250000,
-        'dividend': 50000,
-        'pnl': 300000,
-        'roi': 0.3
-    }
-    
-    def render_metrics(m):
-        if not m:
-            st.warning("資料異常：持股為負")
-            return
-        
-        # 摘要列
-        st.markdown(f"### 總市值: NT$ {m['market_value']:,.0f} | 總報酬率: {m['roi']:.2%}")
-        
-        cols = st.columns(5)
-        labels = ["總投入", "目前市值", "已領息", "總報酬", "總報酬率"]
-        values = [
-            f"{m['invested']:,.0f}",
-            f"{m['market_value']:,.0f}",
-            f"{m['dividend']:,.0f}",
-            f"{m['pnl']:,.0f}",
-            f"{m['roi']:.2%}"
-        ]
-        
-        for i, col in enumerate(cols):
-            with col:
-                st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">{labels[i]}</div>
-                        <div class="metric-value">{values[i]}</div>
-                    </div>
-                """, unsafe_allow_stdio=True)
+# =========================
+# 首頁
+# =========================
+
+if "toast" not in st.session_state:
+    st.session_state.toast = None
+
+if page == "首頁":
+
+    tab_all, tab_stock, tab_fund = st.tabs(["全部", "股票", "基金"])
+
+    stock_df = transactions_df[transactions_df["asset_type"] == "stock"]
+    fund_df = transactions_df[transactions_df["asset_type"] == "fund"]
+    all_df = transactions_df[
+        transactions_df["asset_type"].isin(["stock", "fund"])
+    ]
+
+    all_metrics = calculate_metrics(all_df, prices_df)
+    stock_metrics = calculate_metrics(stock_df, prices_df)
+    fund_metrics = calculate_metrics(fund_df, prices_df)
+
+    def show_metrics(metrics):
+        if metrics is None:
+            st.error("資料異常：出現負持股")
+            st.write("總投入：—")
+            st.write("目前市值：—")
+            st.write("已領息：—")
+            st.write("總報酬：—")
+            st.write("總報酬率：—")
+        else:
+            invest, value, divi, profit, rate = metrics
+            st.write(f"總投入：{round(invest,2)}")
+            st.write(f"目前市值：{round(value,2)}")
+            st.write(f"已領息：{round(divi,2)}")
+            st.write(f"總報酬：{round(profit,2)}")
+            st.write(f"總報酬率：{round(rate,2)}%")
 
     with tab_all:
-        render_metrics(metrics)
-        # 畫個簡單的圖
-        fig = go.Figure(go.Indicator(
-            mode = "gauge+number",
-            value = metrics['roi']*100,
-            title = {'text': "總獲利 %"},
-            gauge = {'axis': {'range': [None, 100]}, 'bar': {'color': "#007bff"}}
-        ))
-        fig.update_layout(height=300)
-        st.plotly_chart(fig, use_container_width=True)
+        show_metrics(all_metrics)
 
     with tab_stock:
-        render_metrics(metrics) # 這裡應傳入股票類別的數據
+        show_metrics(stock_metrics)
 
     with tab_fund:
-        render_metrics(metrics) # 這裡應傳入基金類別的數據
+        show_metrics(fund_metrics)
 
-    # 5. 懸浮按鈕 (FAB)
-    st.markdown("""
-        <div class="fab-container">
-            <button class="fab-button" onclick="document.querySelector('button[kind=secondary]').click()">+</button>
-        </div>
-    """, unsafe_allow_stdio=True)
-    
-    # 隱藏一個真正的 Streamlit 按鈕，由 FAB 觸發
-    if st.button("+", key="real_add_btn", help="新增交易"):
-        add_transaction_dialog()
+# =========================
+# 新增交易
+# =========================
 
-if __name__ == "__main__":
-    main()
+if page == "新增交易":
+
+    # 顯示成功訊息（如果有）
+    if st.session_state.toast:
+        st.success(st.session_state.toast)
+        st.session_state.toast = None
+
+    action = st.selectbox("交易類型", ["buy", "sell", "dividend", "initial"])
+    asset_type = st.selectbox("資產類型", ["stock", "fund"])
+    symbol = st.text_input("代號")
+    strategy = st.text_input("策略")
+    currency = st.selectbox("幣別", ["TWD", "USD"])
+    qty = st.number_input("數量", min_value=0.0)
+    price = st.number_input("單價", min_value=0.0)
+    tx_date = st.date_input("日期")
+
+    fx_rate = st.number_input("匯率", min_value=0.0) if currency == "USD" else 1.0
+
+    if st.button("送出"):
+
+        symbol = clean_symbol(symbol, asset_type)
+
+        if action == "initial":
+
+            if qty <= 0:
+                st.error("initial 數量必須大於 0")
+                st.stop()
+
+            amount_twd = qty * price
+
+            # initial 日期檢查
+            same = transactions_df[
+                transactions_df["symbol"].astype(str).str.upper() == symbol
+            ]
+
+            if not same.empty:
+                same_dates = pd.to_datetime(
+                    same["date"], errors="coerce"
+                ).dropna().dt.date
+
+                if any(d <= tx_date for d in same_dates):
+                    st.error("initial 日期必須早於其他交易")
+                    st.stop()
+
+        else:
+            if currency == "USD" and fx_rate == 0:
+                st.error("USD 必須填匯率")
+                st.stop()
+
+            amount_original = qty * price
+            amount_twd = amount_original * fx_rate
+
+            if abs(qty * price * fx_rate - amount_twd) > 1:
+                st.error("金額驗證錯誤")
+                st.stop()
+
+        new_row = [
+            str(datetime.now().timestamp()),
+            str(tx_date),
+            action,
+            asset_type,
+            symbol,
+            strategy,
+            currency,
+            fx_rate,
+            qty,
+            price,
+            qty * price,
+            amount_twd
+        ]
+
+        sheet.worksheet("transactions").append_row(new_row)
+
+        st.session_state.toast = "新增成功"
+        st.rerun()
