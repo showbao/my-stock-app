@@ -6,17 +6,17 @@ import re
 from datetime import datetime, date
 
 # =========================
-# 基本設定（乾淨極簡）
+# 頁面設定
 # =========================
-st.set_page_config(page_title="投資MVP", layout="wide")
+st.set_page_config(page_title="投資儀表板", layout="wide")
 
-MINIMAL_CSS = """
+DASHBOARD_CSS = """
 <style>
-/* 全站字體與留白（乾淨） */
-.block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+/* 版面留白 */
+.block-container { padding-top: 1.1rem; padding-bottom: 2.0rem; }
 
-/* Sidebar 小一點，內容更乾淨 */
-section[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
+/* Sidebar 不要太擠 */
+section[data-testid="stSidebar"] .block-container { padding-top: 1.0rem; }
 
 /* Tabs 更好按（手機） */
 button[data-baseweb="tab"] {
@@ -25,19 +25,52 @@ button[data-baseweb="tab"] {
   font-size: 16px !important;
 }
 
-/* 輸入欄位間距 */
-div[data-testid="stVerticalBlock"] > div { margin-bottom: 0.35rem; }
+/* 主要標題區（儀表板頂部） */
+.db-hero {
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #0B1220 0%, #111B2E 55%, #0B1220 100%);
+  color: #E5E7EB;
+  border: 1px solid rgba(255,255,255,0.08);
+  margin-bottom: 10px;
+}
+.db-hero-title { font-size: 14px; color: rgba(229,231,235,0.75); margin-bottom: 4px; }
+.db-hero-value { font-size: 34px; font-weight: 700; line-height: 1.1; }
+.db-hero-sub { font-size: 12px; color: rgba(229,231,235,0.60); margin-top: 6px; }
 
-/* 成功/錯誤訊息不要太肥大 */
-div[data-testid="stAlert"] { border-radius: 10px; }
+/* KPI 卡片 */
+.kpi-card {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(15,23,42,0.10);
+  background: #FFFFFF;
+  box-shadow: 0 1px 12px rgba(15,23,42,0.05);
+  margin-bottom: 10px;
+}
+.kpi-title { font-size: 13px; color: #6B7280; margin-bottom: 6px; }
+.kpi-value { font-size: 26px; font-weight: 700; line-height: 1.15; color: #111827; }
+.kpi-sub { font-size: 12px; color: #9CA3AF; margin-top: 4px; }
 
-/* 卡片內文字更乾淨 */
-.kpi-title { font-size: 13px; color: #6b7280; margin-bottom: 6px; }
-.kpi-value { font-size: 28px; font-weight: 650; line-height: 1.15; }
-.kpi-sub { font-size: 12px; color: #9ca3af; margin-top: 4px; }
+/* 小提示字 */
+.small-muted { color: #6B7280; font-size: 12px; }
+
+/* 表單區塊 */
+.form-card {
+  padding: 14px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(15,23,42,0.10);
+  background: #FFFFFF;
+  box-shadow: 0 1px 12px rgba(15,23,42,0.05);
+}
+
+/* 按鈕整行寬更像 App */
+div.stButton > button { border-radius: 12px; }
+
+/* Alert 圓角 */
+div[data-testid="stAlert"] { border-radius: 12px; }
 </style>
 """
-st.markdown(MINIMAL_CSS, unsafe_allow_html=True)
+st.markdown(DASHBOARD_CSS, unsafe_allow_html=True)
 
 # =========================
 # 連線 Google Sheet
@@ -66,7 +99,7 @@ transactions_df, prices_df, allowed_df = load_data()
 # Google 登入
 # =========================
 def login_screen():
-    st.markdown("## 投資記錄")
+    st.markdown("## 投資儀表板")
     st.caption("請使用 Google 登入")
     if st.button("用 Google 登入", use_container_width=True):
         st.login()
@@ -76,13 +109,9 @@ if not st.user.is_logged_in:
     st.stop()
 
 user_email = (st.user.email or "").strip().lower()
-
 allowed_emails = set(
     allowed_df.get("email", pd.Series(dtype=str))
-    .astype(str)
-    .str.strip()
-    .str.lower()
-    .tolist()
+    .astype(str).str.strip().str.lower().tolist()
 )
 
 if user_email not in allowed_emails:
@@ -94,11 +123,11 @@ st.sidebar.success(f"登入：{user_email}")
 st.sidebar.button("登出", on_click=st.logout, use_container_width=True)
 
 # =========================
-# 工具函式
+# 工具函式（保留你原本邏輯）
 # =========================
 def clean_symbol(symbol, asset_type):
     symbol = str(symbol).strip().upper()
-    # 允許 A-Z 0-9 底線 _ 以及小數點 .（為了 0050.TW 這種）
+    # 允許 . ，避免 0050.TW 變 0050TW
     symbol = re.sub(r"[^A-Z0-9_.]", "", symbol)
     if asset_type == "fund" and not symbol.startswith("F_"):
         symbol = "F_" + symbol
@@ -115,6 +144,12 @@ def to_number(x):
         return float(s)
     except:
         return 0.0
+
+def parse_date_series(series):
+    s = series.astype(str).str.strip()
+    s = s.str.replace("/", "-", regex=False).str.replace(".", "-", regex=False)
+    dt = pd.to_datetime(s, errors="coerce", format=None)
+    return dt.dt.date
 
 def get_current_qty(transactions_df, symbol, asset_type):
     df = transactions_df.copy()
@@ -185,6 +220,9 @@ def calculate_metrics(df, prices_df):
     rate = (total_profit / total_invest * 100) if total_invest != 0 else 0.0
     return total_invest, total_value, total_dividend, total_profit, rate
 
+# =========================
+# 顯示用（儀表板風）
+# =========================
 def fmt_money(n):
     try:
         return f"{float(n):,.0f}"
@@ -199,28 +237,57 @@ def fmt_signed_money(n):
     except:
         return "—"
 
-def kpi_card(title, value_text, sub_text=""):
-    with st.container(border=True):
-        st.markdown(
-            f"""
-            <div>
-              <div class="kpi-title">{title}</div>
-              <div class="kpi-value">{value_text}</div>
-              {f'<div class="kpi-sub">{sub_text}</div>' if sub_text else ''}
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+def fmt_signed_pct(n):
+    try:
+        n = float(n)
+        sign = "+" if n > 0 else ""
+        return f"{sign}{n:.2f}%"
+    except:
+        return "—"
 
-def get_fx_info(prices_df):
-    """回傳 (fx, updated_at_text)；抓不到就回 (None, None)"""
+def kpi_card(title, value_text, sub_text=""):
+    st.markdown(
+        f"""
+        <div class="kpi-card">
+          <div class="kpi-title">{title}</div>
+          <div class="kpi-value">{value_text}</div>
+          {f'<div class="kpi-sub">{sub_text}</div>' if sub_text else ''}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+def hero_card(title, value_text, sub_text=""):
+    st.markdown(
+        f"""
+        <div class="db-hero">
+          <div class="db-hero-title">{title}</div>
+          <div class="db-hero-value">{value_text}</div>
+          {f'<div class="db-hero-sub">{sub_text}</div>' if sub_text else ''}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+def get_usd_twd_info(prices_df):
     fx_row = prices_df[prices_df["symbol"] == "USD_TWD"]
     if fx_row.empty:
         return None, None
     fx = to_number(fx_row.iloc[0].get("price"))
     updated_at = fx_row.iloc[0].get("updated_at", "")
     updated_at = str(updated_at).strip() if updated_at is not None else ""
-    return fx, updated_at if updated_at else None
+    return fx, (updated_at if updated_at else None)
+
+def get_prices_updated_at(prices_df):
+    # 用 prices 表中最大的 updated_at 當「最後更新」
+    if "updated_at" not in prices_df.columns or prices_df.empty:
+        return None
+    s = prices_df["updated_at"].astype(str).str.strip()
+    s = s[s != ""]
+    if s.empty:
+        return None
+    # 直接取最大字串（常見格式 YYYY-MM-DD HH:mm:ss 會可用）
+    return s.max()
 
 # =========================
 # 頁面
@@ -228,18 +295,16 @@ def get_fx_info(prices_df):
 page = st.sidebar.radio("選單", ["首頁", "新增交易"])
 
 # =========================
-# 首頁
+# 首頁（金融儀表板風）
 # =========================
 if page == "首頁":
-    st.markdown("## 投資總覽")
+    st.markdown("## 投資儀表板")
 
-    fx, fx_updated = get_fx_info(prices_df)
-    fx_text = f"USD_TWD：{fx:.4f}" if fx is not None else "USD_TWD：—"
-    upd_text = f"更新：{fx_updated}" if fx_updated else ""
+    # 取匯率/更新時間
+    fx, fx_updated = get_usd_twd_info(prices_df)
+    prices_updated = get_prices_updated_at(prices_df)
 
-    # 一行灰字資訊（不佔空間）
-    st.caption(f"{upd_text}　{fx_text}".strip())
-
+    # Tabs：全部/股票/基金
     tab_all, tab_stock, tab_fund = st.tabs(["全部", "股票", "基金"])
 
     stock_df = transactions_df[transactions_df["asset_type"] == "stock"]
@@ -250,45 +315,61 @@ if page == "首頁":
     stock_metrics = calculate_metrics(stock_df, prices_df)
     fund_metrics = calculate_metrics(fund_df, prices_df)
 
-    def show_metrics(metrics):
+    def render_dashboard(metrics, label):
         if metrics is None:
             st.error("資料異常：出現負持股")
+            hero_card("目前市值（TWD）", "—", "請先確認交易資料是否正確")
             kpi_card("總投入", "—")
-            kpi_card("目前市值", "—")
             kpi_card("已領息", "—")
             kpi_card("總報酬", "—")
             kpi_card("總報酬率", "—")
             return
 
         invest, value, divi, profit, rate = metrics
+
+        # Hero：市值
+        sub_parts = []
+        if prices_updated:
+            sub_parts.append(f"價格更新：{prices_updated}")
+        if fx is not None:
+            fx_part = f"USD_TWD：{fx:.4f}"
+            if fx_updated:
+                fx_part += f"（{fx_updated}）"
+            sub_parts.append(fx_part)
+
+        hero_sub = " ｜ ".join(sub_parts) if sub_parts else ""
+        hero_card(f"{label}｜目前市值（TWD）", fmt_money(value), hero_sub)
+
+        # KPI：單欄卡片（手機也安全）
         kpi_card("總投入", fmt_money(invest))
-        kpi_card("目前市值", fmt_money(value))
         kpi_card("已領息", fmt_money(divi))
         kpi_card("總報酬", fmt_signed_money(profit))
-        sign = "+" if rate > 0 else ""
-        kpi_card("總報酬率", f"{sign}{rate:.2f}%")
+        kpi_card("總報酬率", fmt_signed_pct(rate))
 
     with tab_all:
-        show_metrics(all_metrics)
+        render_dashboard(all_metrics, "全部")
 
     with tab_stock:
-        show_metrics(stock_metrics)
+        render_dashboard(stock_metrics, "股票")
 
     with tab_fund:
-        show_metrics(fund_metrics)
+        render_dashboard(fund_metrics, "基金")
 
 # =========================
-# 新增交易
+# 新增交易（儀表板風 + 防連點 + 回彈 + 局部清空）
 # =========================
 if page == "新增交易":
     st.markdown("## 新增交易")
-    st.caption("填完後按下送出。送出時按鈕會鎖住，避免重複寫入。")
+    st.caption("送出時按鈕會鎖住，避免重複寫入。")
+
+    # 外框卡片（看起來像表單區）
+    st.markdown('<div class="form-card">', unsafe_allow_html=True)
 
     # --- 狀態初始化 ---
     st.session_state.setdefault("processing", False)
     st.session_state.setdefault("btn_label", "送出")
 
-    # 這些 key 讓我們可以「成功後局部清空」
+    # 這些 key 讓我們能「成功後局部清空」
     st.session_state.setdefault("in_action", "buy")
     st.session_state.setdefault("in_asset_type", "stock")
     st.session_state.setdefault("in_symbol", "")
@@ -303,7 +384,7 @@ if page == "新增交易":
         # 任何欄位變更：按鈕立刻回到「送出」
         st.session_state.btn_label = "送出"
 
-    # --- 表單（極簡、順序自然）---
+    # --- 欄位順序：像券商輸入單 ---
     action = st.selectbox(
         "交易類型", ["buy", "sell", "dividend", "initial"],
         key="in_action", on_change=mark_dirty
@@ -324,46 +405,54 @@ if page == "新增交易":
     qty = st.number_input("數量", min_value=0.0, key="in_qty", on_change=mark_dirty)
     price = st.number_input("單價", min_value=0.0, key="in_price", on_change=mark_dirty)
 
-    # fx_rate：TWD 時 disabled + 預填 1.0（不留空）
+    # fx_rate：TWD 時 disabled + 預填 1.0
     if currency == "TWD":
         st.session_state.in_fx_rate = 1.0
-        fx_rate = st.number_input("匯率", value=1.0, disabled=True)
+        fx_rate = st.number_input("匯率（USD_TWD）", value=1.0, disabled=True)
     else:
-        fx_rate = st.number_input("匯率", min_value=0.0, key="in_fx_rate", on_change=mark_dirty)
+        fx_rate = st.number_input("匯率（USD_TWD）", min_value=0.0, key="in_fx_rate", on_change=mark_dirty)
+
+    st.markdown("<div class='small-muted'>提示：TWD 會自動使用 1.0；USD 請填 USD_TWD 匯率。</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)  # form-card end
 
     st.divider()
 
     # --- 按鈕狀態（防連點）---
     btn_text = "🔄 寫入中..." if st.session_state.processing else st.session_state.btn_label
     clicked = st.button(btn_text, disabled=st.session_state.processing, use_container_width=True)
-
     status_area = st.empty()
 
     if clicked:
-        # 1) 先鎖住按鈕
         st.session_state.processing = True
         st.session_state.btn_label = "🔄 寫入中..."
         st.rerun()
 
-    # 2) 真正寫入：在 processing=True 時跑（避免連點）
     if st.session_state.processing:
         try:
             symbol = clean_symbol(symbol_input, asset_type)
 
-            # 基本防呆：代號必填（避免空 symbol 被寫入）
+            # 代號必填
             if symbol == "":
                 st.error("代號不可空白")
                 raise ValueError("代號不可空白")
 
-            # 交易計算
+            # USD 必須填匯率（包含 initial）
+            if currency == "USD" and to_number(fx_rate) == 0:
+                st.error("USD 必須填匯率")
+                raise ValueError("USD 必須填匯率")
+
+            fx_used = to_number(fx_rate) if currency == "USD" else 1.0
+
+            # 計算金額
+            amount_original = to_number(qty) * to_number(price)
+            amount_twd = amount_original * fx_used
+
+            # initial 規則
             if action == "initial":
-                if qty <= 0:
+                if to_number(qty) <= 0:
                     st.error("initial 數量必須大於 0")
                     raise ValueError("initial 數量必須大於 0")
 
-                amount_twd = qty * price
-
-                # initial 日期檢查：必須早於同資產其他交易
                 same = transactions_df[
                     transactions_df["symbol"].astype(str).apply(lambda x: clean_symbol(x, asset_type)) == symbol
                 ]
@@ -382,25 +471,16 @@ if page == "新增交易":
                         st.error("initial 日期必須早於此資產的其他交易日期")
                         raise ValueError("initial 日期不合法")
 
-                amount_original = qty * price  # 顯示用途
-
             else:
-                if currency == "USD" and fx_rate == 0:
-                    st.error("USD 必須填匯率")
-                    raise ValueError("USD 必須填匯率")
-
-                amount_original = qty * price
-                amount_twd = amount_original * (fx_rate if currency == "USD" else 1.0)
-
-                # 後端驗證容差 ±1 元
-                if abs(qty * price * (fx_rate if currency == "USD" else 1.0) - amount_twd) > 1:
+                # 金額驗證容差 ±1 元（USD 用換算後）
+                if abs(to_number(qty) * to_number(price) * fx_used - amount_twd) > 1:
                     st.error("金額驗證錯誤")
                     raise ValueError("金額驗證錯誤")
 
-                # sell 超過持有：直接擋下，不寫入
+                # sell 超過持有：擋下
                 if action == "sell":
                     current_qty = get_current_qty(transactions_df, symbol, asset_type)
-                    if qty > current_qty:
+                    if to_number(qty) > current_qty:
                         st.error(f"賣出數量({qty}) 超過目前持有({current_qty})，不允許送出")
                         raise ValueError("賣出超過持有")
 
@@ -412,9 +492,9 @@ if page == "新增交易":
                 symbol,
                 strategy,
                 currency,
-                (fx_rate if currency == "USD" else 1.0),
-                qty,
-                price,
+                fx_used,
+                to_number(qty),
+                to_number(price),
                 amount_original,
                 amount_twd
             ]
@@ -425,13 +505,13 @@ if page == "新增交易":
             st.session_state.btn_label = f"✅ 已存檔 ({saved_at})"
             status_area.caption(st.session_state.btn_label)
 
-            # 成功後局部清空：只清 symbol/qty/price（保留 date/asset_type/strategy/currency）
+            # 局部清空：清 symbol/qty/price（保留 date/asset_type/strategy/currency）
             st.session_state.in_symbol = ""
             st.session_state.in_qty = 0.0
             st.session_state.in_price = 0.0
 
-        except Exception as e:
-            # UI 提示已在上面 st.error() 做過，這裡只確保按鈕回復
+        except Exception:
+            # 上面已用 st.error 顯示原因
             st.session_state.btn_label = "送出"
             status_area.caption("已取消送出（請修正欄位後再送出）")
 
