@@ -71,8 +71,11 @@ st.sidebar.button("登出", on_click=st.logout)
 # =========================
 
 def clean_symbol(symbol, asset_type):
-    symbol = symbol.strip().upper()
-    symbol = re.sub(r"[^A-Z0-9_]", "", symbol)
+    symbol = str(symbol).strip().upper()
+
+    # ✅ 允許 A-Z 0-9 底線 _ 以及小數點 .（為了 0050.TW 這種）
+    symbol = re.sub(r"[^A-Z0-9_.]", "", symbol)
+
     if asset_type == "fund" and not symbol.startswith("F_"):
         symbol = "F_" + symbol
     return symbol
@@ -86,6 +89,12 @@ def to_number(x):
         return 0.0
     s = s.replace(",", "")  # 讓 1,000 變 1000
     return float(s)
+
+def parse_date_series(series):
+    s = series.astype(str).str.strip()
+    s = s.str.replace("/", "-", regex=False).str.replace(".", "-", regex=False)
+    dt = pd.to_datetime(s, errors="coerce", format=None)
+    return dt.dt.date
     
 def calculate_metrics(df, prices_df):
     if df.empty:
@@ -227,19 +236,24 @@ if page == "新增交易":
 
             amount_twd = qty * price
 
-            # initial 日期檢查
-            same = transactions_df[
-                transactions_df["symbol"].astype(str).str.upper() == symbol
-            ]
+# initial 日期檢查：必須早於同資產其他交易
+same = transactions_df[
+    transactions_df["symbol"].astype(str).str.strip().str.upper() == symbol
+]
 
-            if not same.empty:
-                same_dates = pd.to_datetime(
-                    same["date"], errors="coerce"
-                ).dropna().dt.date
+# 有同資產舊交易才需要檢查
+if not same.empty:
+    same_dates = parse_date_series(same["date"]).dropna()
 
-                if any(d <= tx_date for d in same_dates):
-                    st.error("initial 日期必須早於其他交易")
-                    st.stop()
+    # ✅ 吃不到日期就直接擋（避免規格被繞過）
+    if len(same_dates) == 0:
+        st.error("舊資料的 date 格式無法判斷，請先把 transactions 的 date 全部改成 YYYY-MM-DD")
+        st.stop()
+
+    # ✅ 只要存在任何一筆日期 <= 你選的日期，就代表 initial 不是最早 → 擋下來
+    if any(d <= tx_date for d in same_dates.tolist()):
+        st.error("initial 日期必須早於此資產的其他交易日期")
+        st.stop()
 
         else:
             if currency == "USD" and fx_rate == 0:
