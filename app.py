@@ -36,7 +36,7 @@ button[data-baseweb="tab"] {
   margin-bottom: 10px;
 }
 .db-hero-title { font-size: 14px; color: rgba(229,231,235,0.75); margin-bottom: 4px; }
-.db-hero-value { font-size: 34px; font-weight: 700; line-height: 1.1; }
+.db-hero-value { font-size: 36px; font-weight: 750; line-height: 1.1; letter-spacing: 0.2px; font-variant-numeric: tabular-nums; }
 .db-hero-sub { font-size: 12px; color: rgba(229,231,235,0.60); margin-top: 6px; }
 
 /* KPI 卡片 */
@@ -49,7 +49,7 @@ button[data-baseweb="tab"] {
   margin-bottom: 10px;
 }
 .kpi-title { font-size: 13px; color: #6B7280; margin-bottom: 6px; }
-.kpi-value { font-size: 26px; font-weight: 700; line-height: 1.15; color: #111827; }
+.kpi-value { font-size: 26px; font-weight: 750; line-height: 1.15; color: #111827; font-variant-numeric: tabular-nums; }
 .kpi-sub { font-size: 12px; color: #9CA3AF; margin-top: 4px; }
 
 /* 小提示字 */
@@ -71,6 +71,22 @@ div.stButton > button { border-radius: 12px; }
 div[data-testid="stAlert"] { border-radius: 12px; }
 
 /* KPI 佈局：手機一欄，桌機兩欄 */
+
+/* 正負顏色（不用只靠顏色也看得懂：仍保留 + / -） */
+.profit-pos { color: #2E7D32; }
+.profit-neg { color: #C62828; }
+.profit-zero { color: #111827; }
+
+/* 小表格外觀（更像儀表板區塊） */
+.table-wrap {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(15,23,42,0.10);
+  background: #FFFFFF;
+  box-shadow: 0 1px 12px rgba(15,23,42,0.05);
+  margin-top: 8px;
+}
+
 .kpi-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -78,7 +94,23 @@ div[data-testid="stAlert"] { border-radius: 12px; }
   margin-top: 10px;
 }
 @media (min-width: 900px) {
-  .kpi-grid { grid-template-columns: 1fr 1fr; }
+  
+/* 正負顏色（不用只靠顏色也看得懂：仍保留 + / -） */
+.profit-pos { color: #2E7D32; }
+.profit-neg { color: #C62828; }
+.profit-zero { color: #111827; }
+
+/* 小表格外觀（更像儀表板區塊） */
+.table-wrap {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(15,23,42,0.10);
+  background: #FFFFFF;
+  box-shadow: 0 1px 12px rgba(15,23,42,0.05);
+  margin-top: 8px;
+}
+
+.kpi-grid { grid-template-columns: 1fr 1fr; }
 }
 </style>
 """
@@ -288,14 +320,26 @@ def top_holdings_table(df_tx: pd.DataFrame, prices_df: pd.DataFrame, top_n: int 
 
     out = pd.DataFrame(rows)
     if out.empty:
-        return pd.DataFrame(columns=["代碼", "持有數量", "價格", "幣別", "市值(TWD)"])
+        return pd.DataFrame(columns=["代碼", "持有數量", "價格", "幣別", "市值(TWD)", "佔比"])
+
+    # 佔比用「全部持有」做分母（不是只有 top_n）
+    total_mv = float(out["市值(TWD)"].sum()) if "市值(TWD)" in out.columns else 0.0
 
     out = out.sort_values("市值(TWD)", ascending=False).head(top_n)
 
-    # 顯示用格式
+    if total_mv > 0:
+        out["佔比"] = out["市值(TWD)"].map(lambda v: v / total_mv)
+    else:
+        out["佔比"] = 0.0
+
+    # 顯示用格式（字串化，讓表格更乾淨）
     out["持有數量"] = out["持有數量"].map(lambda x: f"{x:,.4f}".rstrip("0").rstrip("."))
     out["價格"] = out["價格"].map(lambda x: f"{x:,.4f}".rstrip("0").rstrip("."))
     out["市值(TWD)"] = out["市值(TWD)"].map(lambda x: f"{x:,.0f}")
+    out["佔比"] = out["佔比"].map(lambda x: f"{x*100:.1f}%")
+
+    # 欄位順序
+    out = out[["代碼", "持有數量", "價格", "幣別", "市值(TWD)", "佔比"]]
 
     return out
 
@@ -321,6 +365,27 @@ def fmt_signed_pct(n):
         n = float(n)
         sign = "+" if n > 0 else ""
         return f"{sign}{n:.2f}%"
+    except:
+        return "—"
+
+
+def fmt_signed_money_html(n):
+    """回傳帶顏色的金額字串（仍保留 + / - 符號）"""
+    try:
+        n = float(n)
+        sign = "+" if n > 0 else ""
+        cls = "profit-pos" if n > 0 else "profit-neg" if n < 0 else "profit-zero"
+        return f"<span class='{cls}'>{sign}{n:,.0f}</span>"
+    except:
+        return "—"
+
+def fmt_signed_pct_html(n):
+    """回傳帶顏色的百分比字串（仍保留 + / - 符號）"""
+    try:
+        n = float(n)
+        sign = "+" if n > 0 else ""
+        cls = "profit-pos" if n > 0 else "profit-neg" if n < 0 else "profit-zero"
+        return f"<span class='{cls}'>{sign}{n:.2f}%</span>"
     except:
         return "—"
 
@@ -477,10 +542,10 @@ if page == "首頁":
             kpi_card_html("已領息", fmt_money(divi)),
 
 
-            kpi_card_html("總報酬", fmt_signed_money(profit)),
+            kpi_card_html("總報酬", fmt_signed_money_html(profit)),
 
 
-            kpi_card_html("總報酬率", fmt_signed_pct(rate)),
+            kpi_card_html("總報酬率", fmt_signed_pct_html(rate)),
 
 
         ])
