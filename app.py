@@ -621,44 +621,46 @@ def refresh_prices(transactions_df, prices_df):
     # USD_TWD
     yahoo_symbols.append("TWD=X")
 
-   # ✅ 分批抓價：避免一次丟太多 symbols 被擋
-  unique_yahoo = sorted(list(set(yahoo_symbols)))
+    # =========================
+    # 抓 Yahoo 價格（分批）
+    # =========================
 
-  all_quotes = {}
-  failed_batches = 0
-  last_err = None
-  last_code = None
+    unique_yahoo = sorted(list(set(yahoo_symbols)))
 
-  CHUNK = 40  # 一次抓 40 個，保守一點比較穩
+    all_quotes = {}
+    failed_batches = 0
+    last_err = None
+    last_code = None
 
-  for i in range(0, len(unique_yahoo), CHUNK):
-      chunk = unique_yahoo[i:i+CHUNK]
-      q, err, code = yahoo_quote(chunk)
+    CHUNK = 40
 
-      if err:
-          failed_batches += 1
-          last_err = err
-          last_code = code
-          continue
+    for i in range(0, len(unique_yahoo), CHUNK):
+        chunk = unique_yahoo[i:i+CHUNK]
 
-      all_quotes.update(q)
+        q, err, code = yahoo_quote(chunk)
 
-  if not all_quotes:
-      # 全部都失敗：顯示原因，不紅屏
-      if last_code:
-          st.error(f"刷新失敗：{last_err}（HTTP {last_code}）")
-      else:
-          st.error(f"刷新失敗：{last_err}")
-      return
+        if err:
+            failed_batches += 1
+            last_err = err
+            last_code = code
+            continue
 
-  # 部分成功：提示一下（但繼續更新）
-  if failed_batches > 0:
-      if last_code:
-          st.warning(f"部分代碼抓價失敗：{last_err}（HTTP {last_code}）。已更新成功抓到的價格。")
-      else:
-          st.warning(f"部分代碼抓價失敗：{last_err}。已更新成功抓到的價格。")
+        all_quotes.update(q)
 
-  quotes = all_quotes
+    if not all_quotes:
+        if last_code:
+            st.error(f"刷新失敗：{last_err}（HTTP {last_code}）")
+        else:
+            st.error(f"刷新失敗：{last_err}")
+        return
+
+    if failed_batches > 0:
+        if last_code:
+            st.warning(f"部分代碼抓價失敗：{last_err}（HTTP {last_code}）")
+        else:
+            st.warning(f"部分代碼抓價失敗：{last_err}")
+
+    quotes = all_quotes
     if err:
       st.error(f"刷新失敗：{err}")
       return
