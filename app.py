@@ -502,17 +502,33 @@ def upsert_symbol_strategy(symbol: str, strategy: str):
 # =========================
 def yahoo_quote(symbols):
     """
-    用 Yahoo Finance quote API 抓報價（不需要 yfinance 套件）
-    回傳 dict: symbol -> price(float)
+    用 Yahoo Finance quote API 抓報價
+    回傳：(quotes_dict, error_text)
+      - quotes_dict: dict symbol -> price(float)
+      - error_text: None 或錯誤字串
     """
     if not symbols:
-        return {}
+        return {}, None
 
     url = "https://query1.finance.yahoo.com/v7/finance/quote"
     params = {"symbols": ",".join(symbols)}
-    r = requests.get(url, params=params, timeout=12)
-    r.raise_for_status()
-    data = r.json()
+
+    # ✅ 加上基本 headers，避免被擋
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+    }
+
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=12)
+        if r.status_code != 200:
+            return {}, f"Yahoo 回應失敗（HTTP {r.status_code}）"
+        data = r.json()
+    except Exception as e:
+        return {}, f"抓價失敗：{type(e).__name__}"
+
     out = {}
     results = data.get("quoteResponse", {}).get("result", [])
     for it in results:
@@ -520,7 +536,12 @@ def yahoo_quote(symbols):
         price = it.get("regularMarketPrice")
         if sym is not None and price is not None:
             out[sym] = float(price)
-    return out
+
+    # Yahoo 有時會回空 result（symbol 格式不對或被擋）
+    if not out:
+        return {}, "Yahoo 未回傳任何價格（可能被擋或代碼格式不支援）"
+
+    return out, None
 
 def can_refresh(prices_df):
     """
@@ -582,7 +603,10 @@ def refresh_prices(transactions_df, prices_df):
     # USD_TWD
     yahoo_symbols.append("TWD=X")
 
-    quotes = yahoo_quote(sorted(list(set(yahoo_symbols))))
+    quotes, err = yahoo_quote(sorted(list(set(yahoo_symbols))))
+    if err:
+      st.error(f"刷新失敗：{err}")
+      return
 
     # 組出要寫回 prices 的 rows
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
