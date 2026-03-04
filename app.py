@@ -138,7 +138,9 @@ def connect_sheet():
 
 sheet = connect_sheet()
 
+@st.cache_data(ttl=60)
 def load_data():
+    # 60 秒內，同一份資料只讀一次，避免 Read requests 爆掉
     transactions = pd.DataFrame(sheet.worksheet("transactions").get_all_records())
     prices = pd.DataFrame(sheet.worksheet("prices").get_all_records())
     allowed = pd.DataFrame(sheet.worksheet("settings_allowed_emails").get_all_records())
@@ -150,7 +152,11 @@ def load_symbol_strategy():
     df = pd.DataFrame(ws.get_all_records())
     return df
 
-transactions_df, prices_df, allowed_df = load_data()
+try:
+    transactions_df, prices_df, allowed_df = load_data()
+except Exception as e:
+    st.error("Google Sheet 讀取太頻繁（429 被限流）。請等 1 分鐘後再重整。")
+    st.stop()
 
 # =========================
 # Google 登入
@@ -881,7 +887,7 @@ if open_add:
                 ]
 
                 sheet.worksheet("transactions").append_row(new_row)
-
+                st.cache_data.clear()
                 # ✅ 勾選同步更新預設策略：寫入 symbol_strategy
                 if st.session_state.sync_symbol_strategy:
                     if not st.session_state.sync_confirm:
@@ -1018,6 +1024,7 @@ if current_page == "dashboard":
             if st.button("🔄 刷新價格", disabled=not ok, use_container_width=True):
                 with st.spinner("正在更新價格…"):
                     refresh_prices(transactions_df, prices_df)
+                    st.cache_data.clear()
                 # 重新讀一次資料（不改架構，只是讓畫面同步）
                 transactions_df, prices_df, allowed_df = load_data()
                 st.rerun()
