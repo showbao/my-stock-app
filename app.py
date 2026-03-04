@@ -506,20 +506,20 @@ def upsert_symbol_strategy(symbol: str, strategy: str):
 # =========================
 # 新增：價格刷新（60 秒冷卻）
 # =========================
+import time
+
 def yahoo_quote(symbols):
     """
-    用 Yahoo Finance quote API 抓報價
-    回傳：(quotes_dict, error_text)
-      - quotes_dict: dict symbol -> price(float)
-      - error_text: None 或錯誤字串
+    回傳 (quotes_dict, err_text, http_code)
+    - quotes_dict: dict yahoo_symbol -> price(float)
+    - err_text: None 或錯誤文字
+    - http_code: None 或 HTTP 狀態碼
     """
     if not symbols:
-        return {}, None
+        return {}, None, None
 
     url = "https://query1.finance.yahoo.com/v7/finance/quote"
     params = {"symbols": ",".join(symbols)}
-
-    # ✅ 加上基本 headers，避免被擋
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json,text/plain,*/*",
@@ -527,27 +527,39 @@ def yahoo_quote(symbols):
         "Connection": "keep-alive",
     }
 
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=12)
-        if r.status_code != 200:
-            return {}, f"Yahoo 回應失敗（HTTP {r.status_code}）"
-        data = r.json()
-    except Exception as e:
-        return {}, f"抓價失敗：{type(e).__name__}"
+    last_code = None
+    last_err = None
 
-    out = {}
-    results = data.get("quoteResponse", {}).get("result", [])
-    for it in results:
-        sym = it.get("symbol")
-        price = it.get("regularMarketPrice")
-        if sym is not None and price is not None:
-            out[sym] = float(price)
+    # ✅ 重試 2 次（被擋/暫時不穩時很有用）
+    for attempt in range(2):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=12)
+            last_code = r.status_code
+            if r.status_code != 200:
+                last_err = f"Yahoo 回應失敗（HTTP {r.status_code}）"
+                time.sleep(1.0)
+                continue
 
-    # Yahoo 有時會回空 result（symbol 格式不對或被擋）
-    if not out:
-        return {}, "Yahoo 未回傳任何價格（可能被擋或代碼格式不支援）"
+            data = r.json()
+            results = data.get("quoteResponse", {}).get("result", [])
+            out = {}
+            for it in results:
+                sym = it.get("symbol")
+                price = it.get("regularMarketPrice")
+                if sym is not None and price is not None:
+                    out[sym] = float(price)
 
-    return out, None
+            if out:
+                return out, None, 200
+
+            last_err = "Yahoo 未回傳任何價格（可能代碼不支援或被擋）"
+            time.sleep(1.0)
+
+        except Exception as e:
+            last_err = f"抓價失敗：{type(e).__name__}"
+            time.sleep(1.0)
+
+    return {}, last_err, last_code
 
 def can_refresh(prices_df):
     """
@@ -609,7 +621,44 @@ def refresh_prices(transactions_df, prices_df):
     # USD_TWD
     yahoo_symbols.append("TWD=X")
 
-    quotes, err = yahoo_quote(sorted(list(set(yahoo_symbols))))
+   # ✅ 分批抓價：避免一次丟太多 symbols 被擋
+  unique_yahoo = sorted(list(set(yahoo_symbols)))
+
+  all_quotes = {}
+  failed_batches = 0
+  last_err = None
+  last_code = None
+
+  CHUNK = 40  # 一次抓 40 個，保守一點比較穩
+
+  for i in range(0, len(unique_yahoo), CHUNK):
+      chunk = unique_yahoo[i:i+CHUNK]
+      q, err, code = yahoo_quote(chunk)
+
+      if err:
+          failed_batches += 1
+          last_err = err
+          last_code = code
+          continue
+
+      all_quotes.update(q)
+
+  if not all_quotes:
+      # 全部都失敗：顯示原因，不紅屏
+      if last_code:
+          st.error(f"刷新失敗：{last_err}（HTTP {last_code}）")
+      else:
+          st.error(f"刷新失敗：{last_err}")
+      return
+
+  # 部分成功：提示一下（但繼續更新）
+  if failed_batches > 0:
+      if last_code:
+          st.warning(f"部分代碼抓價失敗：{last_err}（HTTP {last_code}）。已更新成功抓到的價格。")
+      else:
+          st.warning(f"部分代碼抓價失敗：{last_err}。已更新成功抓到的價格。")
+
+  quotes = all_quotes
     if err:
       st.error(f"刷新失敗：{err}")
       return
