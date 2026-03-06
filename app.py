@@ -350,6 +350,18 @@ def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame
                 df[c] = ""
         return df
 
+    # 讓這個函式可重複呼叫：若傳進來的是已 enrich 過的資料，先把上次加上的欄位移除，避免 merge 衝突
+    derived_cols = [
+        "symbol_key",
+        "asset_name_master", "asset_type_master", "currency_master", "strategy_master",
+        "enabled_master", "price_master", "updated_at_master", "quote_source_master", "quote_code_master",
+        "strategy_effective", "asset_type_effective", "currency_effective", "price_current",
+        "name_effective", "enabled_effective",
+    ]
+    drop_cols = [c for c in derived_cols if c in df.columns]
+    if drop_cols:
+        df = df.drop(columns=drop_cols, errors="ignore")
+
     if "symbol" not in df.columns:
         df["symbol"] = ""
     df["symbol"] = df["symbol"].astype(str).str.strip()
