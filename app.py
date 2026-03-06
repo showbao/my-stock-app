@@ -8,6 +8,7 @@ import json
 import urllib.request
 import urllib.parse
 import html
+import ssl
 from datetime import datetime, date, timedelta
 
 # =========================
@@ -658,6 +659,20 @@ def http_get_text(url: str, timeout: int = 10):
         return resp.read().decode("utf-8", errors="ignore")
 
 
+def http_get_text_unverified(url: str, timeout: int = 10):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/html,text/plain,*/*",
+        },
+        method="GET",
+    )
+    ctx = ssl._create_unverified_context()
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        return resp.read().decode("utf-8", errors="ignore")
+
+
 
 def strip_html_text(raw: str) -> str:
     s = html.unescape(str(raw or ""))
@@ -698,9 +713,56 @@ def parse_nav_from_html(raw_html: str):
     raise ValueError("網頁中找不到淨值")
 
 
-def fetch_nav_from_url(url: str):
-    raw = http_get_text(url, timeout=15)
+def fetch_nav_from_url(url: str, verify_ssl: bool = True):
+    if verify_ssl:
+        raw = http_get_text(url, timeout=15)
+    else:
+        raw = http_get_text_unverified(url, timeout=15)
     return parse_nav_from_html(raw)
+
+
+def fetch_moneydj_nav(nav_code: str):
+    code = str(nav_code or "").strip()
+    if code == "":
+        raise ValueError("MoneyDJ 代碼空白")
+
+    if code.startswith("http://") or code.startswith("https://"):
+        urls = [code]
+    else:
+        urls = [
+            f"https://www.moneydj.com/funddj/ya/yp010000.djhtm?a={urllib.parse.quote(code)}",
+            f"https://www.moneydj.com/funddj/ya/yp010001.djhtm?a={urllib.parse.quote(code)}",
+        ]
+
+    last_err = None
+    for url in urls:
+        try:
+            return fetch_nav_from_url(url, verify_ssl=False)
+        except Exception as e:
+            last_err = e
+            continue
+    raise ValueError(f"MoneyDJ 抓不到：{last_err}")
+
+
+def fetch_fundrich_nav(nav_code: str):
+    code = str(nav_code or "").strip()
+    if code == "":
+        raise ValueError("FundRich 代碼空白")
+    if code.startswith("http://") or code.startswith("https://"):
+        urls = [code]
+    else:
+        urls = [
+            f"https://www.fundrich.com.tw/fund/detail/{urllib.parse.quote(code)}",
+            f"https://www.fundrich.com.tw/fund/{urllib.parse.quote(code)}",
+        ]
+    last_err = None
+    for url in urls:
+        try:
+            return fetch_nav_from_url(url, verify_ssl=False)
+        except Exception as e:
+            last_err = e
+            continue
+    raise ValueError(f"FundRich 抓不到：{last_err}")
 
 
 def fetch_fund_price_for_asset(asset_row: dict):
@@ -712,7 +774,10 @@ def fetch_fund_price_for_asset(asset_row: dict):
 
     last_err = None
 
-    # 1) Yahoo：最適合有基金代碼的商品
+    if quote_source == "manual":
+        return None, None
+
+    # 1) Yahoo：有正式基金代碼時優先
     if quote_source in ["", "yahoo", "auto", "fund_auto"] and quote_code:
         try:
             p, ccy = fetch_yahoo_chart_last_price(quote_code)
@@ -720,24 +785,38 @@ def fetch_fund_price_for_asset(asset_row: dict):
         except Exception as e:
             last_err = e
 
-    # 2) nav_code 若填完整網址，就直接抓該頁面淨值
-    if nav_code.startswith("http://") or nav_code.startswith("https://"):
+    # 2) MoneyDJ：可用完整網址，或只填基金代碼
+    if quote_source in ["moneydj", "auto", "fund_auto"] and nav_code:
         try:
-            p = fetch_nav_from_url(nav_code)
+            p = fetch_moneydj_nav(nav_code)
             return p, (currency or "USD")
         except Exception as e:
             last_err = e
 
-    # 3) 若 nav_code 放的是 Yahoo 基金代碼，也可直接試
-    if nav_code and not nav_code.startswith("http://") and not nav_code.startswith("https://"):
+    # 3) FundRich：可用完整網址，或只填基金代碼
+    if quote_source in ["fundrich", "auto", "fund_auto"] and nav_code:
+        try:
+            p = fetch_fundrich_nav(nav_code)
+            return p, (currency or "USD")
+        except Exception as e:
+            last_err = e
+
+    # 4) 若 nav_code 是網址，最後再用一般網頁解析試一次
+    if nav_code.startswith("http://") or nav_code.startswith("https://"):
+        try:
+            verify_ssl = ("moneydj.com" not in nav_code.lower() and "fundrich.com.tw" not in nav_code.lower())
+            p = fetch_nav_from_url(nav_code, verify_ssl=verify_ssl)
+            return p, (currency or "USD")
+        except Exception as e:
+            last_err = e
+
+    # 5) 若 nav_code 看起來像 Yahoo 基金代碼，再試一次 Yahoo
+    if nav_code and not nav_code.startswith("http://") and not nav_code.startswith("https://") and quote_source not in ["moneydj", "fundrich"]:
         try:
             p, ccy = fetch_yahoo_chart_last_price(nav_code)
             return p, (ccy or currency or "USD")
         except Exception as e:
             last_err = e
-
-    if quote_source == "manual":
-        return None, None
 
     raise ValueError(f"抓不到：{last_err}")
 
