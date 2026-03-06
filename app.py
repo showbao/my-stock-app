@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import gspread
@@ -123,7 +124,6 @@ def connect_sheet():
 sheet = connect_sheet()
 
 def ensure_worksheet(ws_name: str, headers: list[str]):
-    """若工作表不存在就建立（新增功能：不會動到既有表）"""
     try:
         ws = sheet.worksheet(ws_name)
         return ws
@@ -132,21 +132,24 @@ def ensure_worksheet(ws_name: str, headers: list[str]):
         ws.append_row(headers)
         return ws
 
+def safe_get_records(ws_name: str, default_headers: list[str]) -> pd.DataFrame:
+    ws = ensure_worksheet(ws_name, default_headers)
+    rows = ws.get_all_records()
+    return pd.DataFrame(rows)
+
 def load_data():
-    transactions = pd.DataFrame(sheet.worksheet("transactions").get_all_records())
-    prices = pd.DataFrame(sheet.worksheet("prices").get_all_records())
-    allowed = pd.DataFrame(sheet.worksheet("settings_allowed_emails").get_all_records())
+    transactions = safe_get_records(
+        "transactions",
+        ["id", "date", "action", "symbol", "currency", "fx_rate", "qty", "price", "amount_original", "amount_twd"]
+    )
+    assets = safe_get_records(
+        "assets",
+        ["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"]
+    )
+    allowed = safe_get_records("settings_allowed_emails", ["email"])
+    return transactions, assets, allowed
 
-    # 新增：symbol_strategy 表（不存在就建立）
-    try:
-        symbol_strategy = pd.DataFrame(sheet.worksheet("symbol_strategy").get_all_records())
-    except Exception:
-        ensure_worksheet("symbol_strategy", ["symbol", "strategy", "updated_at"])
-        symbol_strategy = pd.DataFrame(sheet.worksheet("symbol_strategy").get_all_records())
-
-    return transactions, prices, allowed, symbol_strategy
-
-transactions_df, prices_df, allowed_df, symbol_strategy_df = load_data()
+transactions_df, assets_df, allowed_df = load_data()
 
 # =========================
 # Google 登入
@@ -182,15 +185,19 @@ with top_r:
     st.button("登出", on_click=st.logout, use_container_width=True)
 
 # =========================
-# 工具函式（保留你原本邏輯）
+# 工具函式
 # =========================
-def clean_symbol(symbol, asset_type):
-    symbol = str(symbol).strip().upper()
-    # 允許 . ，避免 0050.TW 變 0050TW
-    symbol = re.sub(r"[^A-Z0-9_.]", "", symbol)
-    if asset_type == "fund" and not symbol.startswith("F_"):
-        symbol = "F_" + symbol
-    return symbol
+def clean_symbol(symbol, asset_type=""):
+    s = str(symbol).strip()
+    at = str(asset_type).strip().lower()
+    if at == "stock":
+        s = s.upper()
+    if at == "fund":
+        return s
+    return s
+
+def symbol_key(symbol: str) -> str:
+    return str(symbol).strip().upper()
 
 def to_number(x):
     if x is None:
@@ -201,7 +208,7 @@ def to_number(x):
     s = s.replace(",", "")
     try:
         return float(s)
-    except:
+    except Exception:
         return 0.0
 
 def parse_date_series(series):
@@ -216,25 +223,191 @@ def parse_dt_any(x):
     s = str(x).strip()
     if s == "":
         return None
-    # 常見：YYYY-MM-DD HH:mm:ss / ISO 8601
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
     except Exception:
         pass
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y-%m-%d"):
         try:
             return datetime.strptime(s, fmt)
         except Exception:
             continue
     return None
 
-def get_current_qty(transactions_df, symbol, asset_type):
-    df = transactions_df.copy()
-    df["symbol_norm"] = df["symbol"].astype(str).apply(lambda x: clean_symbol(x, asset_type))
-    target = df[df["symbol_norm"] == symbol]
-    if target.empty:
-        return 0.0
+def normalize_assets_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy() if df is not None else pd.DataFrame()
+    required = ["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"]
+    for c in required:
+        if c not in out.columns:
+            out[c] = ""
+    if out.empty:
+        return out
+    out["symbol"] = out["symbol"].astype(str).str.strip()
+    out["symbol_key"] = out["symbol"].astype(str).apply(symbol_key)
+    out["name"] = out["name"].astype(str).str.strip()
+    out["asset_type"] = out["asset_type"].astype(str).str.strip().str.lower()
+    out["quote_source"] = out["quote_source"].astype(str).str.strip().str.lower()
+    out["quote_code"] = out["quote_code"].astype(str).str.strip()
+    out["currency"] = out["currency"].astype(str).str.strip().str.upper()
+    out["strategy"] = out["strategy"].astype(str).str.strip()
+    out["enabled"] = out["enabled"].astype(str).str.strip().str.upper()
+    out["price_num"] = out["price"].apply(to_number)
+    return out
 
+assets_df = normalize_assets_df(assets_df)
+
+def get_asset_row(symbol: str):
+    if assets_df is None or assets_df.empty:
+        return None
+    key = symbol_key(symbol)
+    rows = assets_df[assets_df["symbol_key"] == key]
+    if rows.empty:
+        return None
+    return rows.iloc[-1].to_dict()
+
+def get_default_strategy(symbol: str) -> str:
+    row = get_asset_row(symbol)
+    if not row:
+        return ""
+    return str(row.get("strategy", "")).strip()
+
+def get_asset_currency(symbol: str) -> str:
+    row = get_asset_row(symbol)
+    if not row:
+        return ""
+    return str(row.get("currency", "")).strip().upper()
+
+def get_asset_type(symbol: str) -> str:
+    row = get_asset_row(symbol)
+    if not row:
+        return ""
+    return str(row.get("asset_type", "")).strip().lower()
+
+def update_asset_master(symbol: str, asset_type: str = "", currency: str = "", strategy: str = "", name: str = "", quote_source: str = "", quote_code: str = "", enabled: str = "Y"):
+    ws = ensure_worksheet("assets", ["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"])
+    rows = ws.get_all_values()
+    if not rows:
+        ws.append_row(["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"])
+        rows = ws.get_all_values()
+
+    header = rows[0]
+    header_idx = {h: i for i, h in enumerate(header)}
+
+    required = ["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"]
+    missing = [c for c in required if c not in header_idx]
+    if missing:
+        raise ValueError("assets 表欄位不足，需包含：" + ",".join(required))
+
+    key = symbol_key(symbol)
+    target_row = None
+    existing = None
+    for i in range(1, len(rows)):
+        r = rows[i]
+        sym = str(r[header_idx["symbol"]]).strip() if len(r) > header_idx["symbol"] else ""
+        if symbol_key(sym) == key:
+            target_row = i + 1
+            existing = {col: (r[idx] if len(r) > idx else "") for col, idx in header_idx.items()}
+            break
+
+    if existing is None:
+        existing = {col: "" for col in header}
+
+    values = existing.copy()
+    values["symbol"] = str(symbol).strip()
+    if name != "":
+        values["name"] = str(name).strip()
+    elif values.get("name", "") == "":
+        values["name"] = str(symbol).strip()
+    if asset_type != "":
+        values["asset_type"] = str(asset_type).strip().lower()
+    if quote_source != "":
+        values["quote_source"] = str(quote_source).strip().lower()
+    if quote_code != "":
+        values["quote_code"] = str(quote_code).strip()
+    elif values.get("quote_code", "") == "":
+        values["quote_code"] = str(symbol).strip()
+    if currency != "":
+        values["currency"] = str(currency).strip().upper()
+    if strategy != "":
+        values["strategy"] = str(strategy).strip()
+    if enabled != "":
+        values["enabled"] = str(enabled).strip().upper()
+    if values.get("enabled", "") == "":
+        values["enabled"] = "Y"
+
+    out_row = [values.get(col, "") for col in header]
+    if target_row is None:
+        ws.append_row(out_row)
+    else:
+        end_col = chr(ord("A") + len(header) - 1)
+        ws.update(f"A{target_row}:{end_col}{target_row}", [out_row])
+
+def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame) -> pd.DataFrame:
+    df = df_tx.copy() if df_tx is not None else pd.DataFrame()
+    if df.empty:
+        for c in ["symbol", "strategy_effective", "asset_type_effective", "currency_effective", "price_current", "name_effective", "enabled_effective"]:
+            if c not in df.columns:
+                df[c] = ""
+        return df
+
+    if "symbol" not in df.columns:
+        df["symbol"] = ""
+    df["symbol"] = df["symbol"].astype(str).str.strip()
+    df["symbol_key"] = df["symbol"].astype(str).apply(symbol_key)
+
+    a = assets_df.copy() if assets_df is not None else pd.DataFrame()
+    if a.empty:
+        df["strategy_effective"] = df.get("strategy", "").astype(str).str.strip() if "strategy" in df.columns else ""
+        df["asset_type_effective"] = df.get("asset_type", "").astype(str).str.strip().str.lower() if "asset_type" in df.columns else ""
+        df["currency_effective"] = df.get("currency", "").astype(str).str.strip().str.upper() if "currency" in df.columns else ""
+        df["price_current"] = 0.0
+        df["name_effective"] = df["symbol"]
+        df["enabled_effective"] = "Y"
+        return df
+
+    keep = a[["symbol_key", "name", "asset_type", "currency", "strategy", "enabled", "price_num", "updated_at", "quote_source", "quote_code"]].copy()
+    keep = keep.rename(columns={
+        "name": "asset_name_master",
+        "asset_type": "asset_type_master",
+        "currency": "currency_master",
+        "strategy": "strategy_master",
+        "enabled": "enabled_master",
+        "price_num": "price_master",
+        "updated_at": "updated_at_master",
+        "quote_source": "quote_source_master",
+        "quote_code": "quote_code_master",
+    })
+    df = df.merge(keep, on="symbol_key", how="left")
+
+    tx_strategy = df["strategy"].astype(str).str.strip() if "strategy" in df.columns else pd.Series([""] * len(df))
+    tx_asset_type = df["asset_type"].astype(str).str.strip().str.lower() if "asset_type" in df.columns else pd.Series([""] * len(df))
+    tx_currency = df["currency"].astype(str).str.strip().str.upper() if "currency" in df.columns else pd.Series([""] * len(df))
+
+    df["strategy_effective"] = df["strategy_master"].fillna("").astype(str).str.strip()
+    df.loc[df["strategy_effective"] == "", "strategy_effective"] = tx_strategy
+    df.loc[df["strategy_effective"] == "", "strategy_effective"] = "未分類"
+
+    df["asset_type_effective"] = df["asset_type_master"].fillna("").astype(str).str.strip().str.lower()
+    df.loc[df["asset_type_effective"] == "", "asset_type_effective"] = tx_asset_type
+
+    df["currency_effective"] = df["currency_master"].fillna("").astype(str).str.strip().str.upper()
+    df.loc[df["currency_effective"] == "", "currency_effective"] = tx_currency
+
+    df["price_current"] = df["price_master"].fillna(0).apply(to_number)
+    df["name_effective"] = df["asset_name_master"].fillna("").astype(str).str.strip()
+    df.loc[df["name_effective"] == "", "name_effective"] = df["symbol"]
+
+    df["enabled_effective"] = df["enabled_master"].fillna("").astype(str).str.strip().str.upper()
+    df.loc[df["enabled_effective"] == "", "enabled_effective"] = "Y"
+    return df
+
+enriched_tx_df = enrich_transactions_with_assets(transactions_df, assets_df)
+
+def get_current_qty(transactions_df, symbol, asset_type=""):
+    df = enrich_transactions_with_assets(transactions_df, assets_df)
+    if df.empty:
+        return 0.0
+    target = df[df["symbol_key"] == symbol_key(symbol)]
     qty = 0.0
     for _, row in target.iterrows():
         action = str(row.get("action", "")).strip().lower()
@@ -245,19 +418,21 @@ def get_current_qty(transactions_df, symbol, asset_type):
             qty -= q
     return qty
 
-def calculate_metrics(df, prices_df):
-    if df.empty:
+def calculate_metrics(df, assets_df):
+    if df is None or df.empty:
         return 0, 0, 0, 0, 0
 
+    data = enrich_transactions_with_assets(df, assets_df)
     result = {}
-    for _, row in df.iterrows():
-        symbol = row["symbol"]
-        action = row["action"]
+
+    for _, row in data.iterrows():
+        symbol = str(row.get("symbol", "")).strip()
+        action = str(row.get("action", "")).strip().lower()
         qty = to_number(row.get("qty"))
         amount_twd = to_number(row.get("amount_twd"))
 
         if symbol not in result:
-            result[symbol] = {"qty": 0, "cost": 0, "dividend": 0}
+            result[symbol] = {"qty": 0.0, "cost": 0.0, "dividend": 0.0}
 
         if action in ["buy", "initial"]:
             result[symbol]["qty"] += qty
@@ -268,6 +443,9 @@ def calculate_metrics(df, prices_df):
         elif action == "dividend":
             result[symbol]["dividend"] += amount_twd
 
+    fx_row = get_asset_row("USD_TWD")
+    usd_twd = to_number(fx_row.get("price_num")) if fx_row else 0.0
+
     total_invest = 0.0
     total_value = 0.0
     total_dividend = 0.0
@@ -276,18 +454,13 @@ def calculate_metrics(df, prices_df):
         if data["qty"] < 0:
             return None
 
-        price_row = prices_df[prices_df["symbol"] == symbol]
-        if not price_row.empty:
-            price = to_number(price_row.iloc[0].get("price"))
-            currency = str(price_row.iloc[0].get("currency", "")).strip().upper()
-            value = data["qty"] * price
+        row = get_asset_row(symbol)
+        price = to_number(row.get("price_num")) if row else 0.0
+        currency = str(row.get("currency", "")).strip().upper() if row else ""
 
-            if currency == "USD":
-                fx_row = prices_df[prices_df["symbol"] == "USD_TWD"]
-                fx = to_number(fx_row.iloc[0].get("price")) if not fx_row.empty else 0.0
-                value *= fx
-        else:
-            value = 0.0
+        value = data["qty"] * price
+        if currency == "USD":
+            value *= usd_twd
 
         total_invest += data["cost"]
         total_value += value
@@ -297,17 +470,15 @@ def calculate_metrics(df, prices_df):
     rate = (total_profit / total_invest * 100) if total_invest != 0 else 0.0
     return total_invest, total_value, total_dividend, total_profit, rate
 
-def top_holdings_table(df_tx: pd.DataFrame, prices_df: pd.DataFrame, top_n: int = 3) -> pd.DataFrame:
-    """回傳持有市值前 N 名（只顯示用）"""
+def top_holdings_table(df_tx: pd.DataFrame, assets_df: pd.DataFrame, top_n: int = 3) -> pd.DataFrame:
     if df_tx is None or df_tx.empty:
         return pd.DataFrame(columns=["代碼", "持有數量", "價格", "幣別", "市值(TWD)"])
 
-    tx = df_tx.copy()
+    tx = enrich_transactions_with_assets(df_tx, assets_df).copy()
     tx["qty"] = tx.get("qty", 0).apply(to_number)
     tx["action"] = tx.get("action", "").astype(str).str.strip().str.lower()
     tx["symbol"] = tx.get("symbol", "").astype(str)
 
-    # 計算目前持有 qty（buy/initial 加，sell 減）
     pos = {}
     for _, r in tx.iterrows():
         sym = r["symbol"]
@@ -320,23 +491,16 @@ def top_holdings_table(df_tx: pd.DataFrame, prices_df: pd.DataFrame, top_n: int 
         elif act == "sell":
             pos[sym] -= q
 
-    # 取得 USD_TWD
-    fx_row = prices_df[prices_df["symbol"] == "USD_TWD"] if prices_df is not None and not prices_df.empty else pd.DataFrame()
-    usd_twd = to_number(fx_row.iloc[0].get("price")) if not fx_row.empty else 0.0
+    usd_twd_row = get_asset_row("USD_TWD")
+    usd_twd = to_number(usd_twd_row.get("price_num")) if usd_twd_row else 0.0
 
     rows = []
     for sym, q in pos.items():
         if q <= 0:
             continue
-
-        p_row = prices_df[prices_df["symbol"] == sym] if prices_df is not None and not prices_df.empty else pd.DataFrame()
-        if p_row.empty:
-            price = 0.0
-            ccy = ""
-        else:
-            price = to_number(p_row.iloc[0].get("price"))
-            ccy = str(p_row.iloc[0].get("currency", "")).strip().upper()
-
+        a = get_asset_row(sym)
+        price = to_number(a.get("price_num")) if a else 0.0
+        ccy = str(a.get("currency", "")).strip().upper() if a else ""
         mv = q * price
         if ccy == "USD":
             mv *= usd_twd
@@ -353,9 +517,7 @@ def top_holdings_table(df_tx: pd.DataFrame, prices_df: pd.DataFrame, top_n: int 
     if out.empty:
         return pd.DataFrame(columns=["代碼", "持有數量", "價格", "幣別", "市值(TWD)", "佔比"])
 
-    # 佔比用「全部持有」做分母（不是只有 top_n）
     total_mv = float(out["市值(TWD)"].sum()) if "市值(TWD)" in out.columns else 0.0
-
     out = out.sort_values("市值(TWD)", ascending=False).head(top_n)
 
     if total_mv > 0:
@@ -363,13 +525,10 @@ def top_holdings_table(df_tx: pd.DataFrame, prices_df: pd.DataFrame, top_n: int 
     else:
         out["佔比"] = 0.0
 
-    # 顯示用格式（字串化，讓表格更乾淨）
     out["持有數量"] = out["持有數量"].map(lambda x: f"{x:,.4f}".rstrip("0").rstrip("."))
     out["價格"] = out["價格"].map(lambda x: f"{x:,.4f}".rstrip("0").rstrip("."))
     out["市值(TWD)"] = out["市值(TWD)"].map(lambda x: f"{x:,.0f}")
     out["佔比"] = out["佔比"].map(lambda x: f"{x*100:.1f}%")
-
-    # 欄位順序
     out = out[["代碼", "持有數量", "價格", "幣別", "市值(TWD)", "佔比"]]
     return out
 
@@ -379,43 +538,25 @@ def top_holdings_table(df_tx: pd.DataFrame, prices_df: pd.DataFrame, top_n: int 
 def fmt_money(n):
     try:
         return f"{float(n):,.0f}"
-    except:
-        return "—"
-
-def fmt_signed_money(n):
-    try:
-        n = float(n)
-        sign = "+" if n > 0 else ""
-        return f"{sign}{n:,.0f}"
-    except:
-        return "—"
-
-def fmt_signed_pct(n):
-    try:
-        n = float(n)
-        sign = "+" if n > 0 else ""
-        return f"{sign}{n:.2f}%"
-    except:
+    except Exception:
         return "—"
 
 def fmt_signed_money_html(n):
-    """回傳帶顏色的金額字串（仍保留 + / - 符號）"""
     try:
         n = float(n)
         sign = "+" if n > 0 else ""
         cls = "profit-pos" if n > 0 else "profit-neg" if n < 0 else "profit-zero"
         return f"<span class='{cls}'>{sign}{n:,.0f}</span>"
-    except:
+    except Exception:
         return "—"
 
 def fmt_signed_pct_html(n):
-    """回傳帶顏色的百分比字串（仍保留 + / - 符號）"""
     try:
         n = float(n)
         sign = "+" if n > 0 else ""
         cls = "profit-pos" if n > 0 else "profit-neg" if n < 0 else "profit-zero"
         return f"<span class='{cls}'>{sign}{n:.2f}%</span>"
-    except:
+    except Exception:
         return "—"
 
 def kpi_card_html(title, value_text, sub_text=""):
@@ -440,62 +581,25 @@ def hero_card(title, value_text, sub_text=""):
         unsafe_allow_html=True
     )
 
-def get_usd_twd_info(prices_df):
-    fx_row = prices_df[prices_df["symbol"] == "USD_TWD"]
-    if fx_row.empty:
+def get_usd_twd_info(assets_df):
+    row = get_asset_row("USD_TWD")
+    if not row:
         return None, None
-    fx = to_number(fx_row.iloc[0].get("price"))
-    updated_at = fx_row.iloc[0].get("updated_at", "")
-    updated_at = str(updated_at).strip() if updated_at is not None else ""
+    fx = to_number(row.get("price_num"))
+    updated_at = str(row.get("updated_at", "")).strip()
     return fx, (updated_at if updated_at else None)
 
-def get_prices_updated_at(prices_df):
-    if "updated_at" not in prices_df.columns or prices_df.empty:
+def get_prices_updated_at(assets_df):
+    if assets_df is None or assets_df.empty or "updated_at" not in assets_df.columns:
         return None
-    s = prices_df["updated_at"].astype(str).str.strip()
+    s = assets_df["updated_at"].astype(str).str.strip()
     s = s[s != ""]
     if s.empty:
         return None
     return s.max()
 
 # =========================
-# 新增：策略對照（symbol → strategy）
-# =========================
-def get_default_strategy(symbol: str) -> str:
-    if symbol_strategy_df is None or symbol_strategy_df.empty:
-        return ""
-    df = symbol_strategy_df.copy()
-    df["symbol"] = df.get("symbol", "").astype(str).str.strip().str.upper()
-    row = df[df["symbol"] == str(symbol).strip().upper()]
-    if row.empty:
-        return ""
-    return str(row.iloc[-1].get("strategy", "")).strip()
-
-def upsert_symbol_strategy(symbol: str, strategy: str):
-    ws = ensure_worksheet("symbol_strategy", ["symbol", "strategy", "updated_at"])
-    symbol_u = str(symbol).strip().upper()
-    strategy_s = str(strategy).strip()
-    now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # 先找是否已有同 symbol（用整欄掃描，資料量小才合理）
-    try:
-        col = ws.col_values(1)  # A 欄 symbol
-        idx = None
-        for i, v in enumerate(col):
-            if i == 0:
-                continue  # header
-            if str(v).strip().upper() == symbol_u:
-                idx = i + 1  # worksheet 是 1-based row
-        if idx is not None:
-            ws.update(f"A{idx}:C{idx}", [[symbol_u, strategy_s, now_s]])
-        else:
-            ws.append_row([symbol_u, strategy_s, now_s])
-    except Exception:
-        # 寫入失敗就丟出去，讓上層顯示錯誤
-        raise
-
-# =========================
-# 新增：抓價（盡量穩定、可替代）
+# 抓價
 # =========================
 def http_get_json(url: str, timeout: int = 10):
     req = urllib.request.Request(
@@ -523,8 +627,6 @@ def http_get_text(url: str, timeout: int = 10):
         return resp.read().decode("utf-8", errors="ignore")
 
 def fetch_usd_twd_open_er_api():
-    # 不需要 API key：open.er-api.com
-    # 回傳格式：{ "rates": { "TWD": 31.xx, ... }, ... }
     url = "https://open.er-api.com/v6/latest/USD"
     j = http_get_json(url, timeout=10)
     rates = j.get("rates", {}) if isinstance(j, dict) else {}
@@ -534,8 +636,6 @@ def fetch_usd_twd_open_er_api():
     return float(rate)
 
 def fetch_usd_twd_fawaz():
-    # 不需要 API key：@fawazahmed0/currency-api（走 jsDelivr CDN）
-    # 回傳格式：{ "twd": 31.xx, ... }
     url = "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd/twd.json"
     j = http_get_json(url, timeout=10)
     rate = j.get("twd", None) if isinstance(j, dict) else None
@@ -544,7 +644,6 @@ def fetch_usd_twd_fawaz():
     return float(rate)
 
 def fetch_usd_twd():
-    # 依序嘗試（避免單一來源掛掉）
     last_err = None
     for fn in (fetch_usd_twd_open_er_api, fetch_usd_twd_fawaz):
         try:
@@ -556,53 +655,16 @@ def fetch_usd_twd():
             continue
     raise ValueError(f"USD_TWD 抓取失敗：{last_err}")
 
-def fetch_tw_stock_price_mis(symbol: str):
-    """
-    台股：用 TWSE MIS 介面抓盤中/最新價
-    symbol 允許：'2330' / '2330.TW' / '0050.TW'
-    """
-    s = str(symbol).strip().upper()
-    s = s.replace(".TW", "").replace(".TWO", "")
-    s = re.sub(r"[^0-9A-Z]", "", s)
-
-    # 嘗試同時查上市/上櫃
-    ex_ch = f"tse_{s}.tw|otc_{s}.tw"
-    url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?" + urllib.parse.urlencode(
-        {"ex_ch": ex_ch, "json": "1", "delay": "0"}
-    )
-    j = http_get_json(url, timeout=10)
-
-    arr = j.get("msgArray", []) if isinstance(j, dict) else []
-    if not arr:
-        raise ValueError("台股來源查不到資料")
-
-    r0 = arr[0]
-    # z = 當前成交價；若 '-' 用 y(昨收) 或 o(開)
-    z = str(r0.get("z", "")).strip()
-    if z in ("", "-", "0", "0.0"):
-        z = str(r0.get("y", "")).strip()
-    price = to_number(z)
-    if price <= 0:
-        raise ValueError("台股來源回傳價格不合法")
-    return float(price)
-
 def fetch_us_stock_price_stooq(symbol: str):
-    """
-    Stooq quote：https://stooq.com/q/l/?s=aapl.us&f=sd2t2ohlcv&h&e=csv
-    需要 Stooq 代碼：AAPL.US（不是 AAPL）
-    """
     s = str(symbol).strip().upper()
-    # 常見：AAPL -> AAPL.US（先以 US 為預設）
     if "." not in s:
         s = f"{s}.US"
     url = f"https://stooq.com/q/l/?s={urllib.parse.quote(s.lower())}&f=sd2t2ohlcv&h&e=csv"
     txt = http_get_text(url, timeout=10).strip()
-    # 期待兩行：header + data
     lines = [ln for ln in txt.splitlines() if ln.strip()]
     if len(lines) < 2:
         raise ValueError("Stooq 回傳格式不正確")
     parts = [p.strip() for p in lines[1].split(",")]
-    # header: Symbol,Date,Time,Open,High,Low,Close,Volume
     if len(parts) < 8:
         raise ValueError("Stooq 回傳欄位不足")
     close = to_number(parts[6])
@@ -610,16 +672,10 @@ def fetch_us_stock_price_stooq(symbol: str):
         raise ValueError("Stooq 回傳價格不合法")
     return float(close)
 
-
 def fetch_yahoo_chart_last_price(ticker: str):
-    """從 Yahoo Chart 取最近收盤/最新價（不用 API key）。
-    回傳 (price, currency)；失敗會丟出例外。
-    """
     t = str(ticker).strip()
     if t == "":
         raise ValueError("ticker 空白")
-
-    # Yahoo chart endpoint
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(t)}?interval=1d&range=5d"
     j = http_get_json(url, timeout=12)
 
@@ -641,7 +697,6 @@ def fetch_yahoo_chart_last_price(ticker: str):
     if not quote:
         raise ValueError("Yahoo 缺少 quote")
     closes = (quote[0].get("close") or [])
-    # 找最後一個非 None 的 close
     last = None
     for v in reversed(closes):
         if v is None:
@@ -656,200 +711,129 @@ def fetch_yahoo_chart_last_price(ticker: str):
         raise ValueError("Yahoo 價格不合法")
     return price, currency
 
-
 def normalize_yahoo_ticker(symbol: str) -> str:
-    """把輸入 symbol 轉成 Yahoo 常用的 ticker（針對台股/ETF 優先）"""
     s = str(symbol).strip().upper()
-
-    # 你表內常見：0050.TW / 0056.TW / 2330.TW
     if re.fullmatch(r"\d{4}", s):
         return s + ".TW"
-
-    # 0050.TW / 00715L.TW 等：直接回傳
     if s.endswith(".TW") or s.endswith(".TWO") or s.endswith(".US"):
         return s
-
-    # 其他：先原樣回傳（讓 Yahoo 自己判斷，例：AAPL）
     return s
 
+def fetch_price_for_asset(asset_row: dict):
+    sym = str(asset_row.get("symbol", "")).strip()
+    asset_type = str(asset_row.get("asset_type", "")).strip().lower()
+    quote_source = str(asset_row.get("quote_source", "")).strip().lower()
+    quote_code = str(asset_row.get("quote_code", "")).strip()
+    currency = str(asset_row.get("currency", "")).strip().upper()
 
-def fetch_price(symbol: str, asset_type: str):
-    """
-    依資產類型抓價（新增功能，改成更適合雲端環境的來源）
-    - USD_TWD：免 key 匯率來源（已在 fetch_usd_twd() 做多來源）
-    - stock：先走 Yahoo（台股/ETF 尤其適合），失敗再用 Stooq（偏美股）
-    - fund：先嘗試 Yahoo（若你用的是 Yahoo 能識別的基金代碼/ETF），否則回 None
-    """
-    s = str(symbol).strip().upper()
-
-    if s == "USD_TWD":
+    if symbol_key(sym) == "USD_TWD" or asset_type == "system":
         return fetch_usd_twd(), "TWD"
 
-    if asset_type == "stock":
-        # 先 Yahoo（避免 TWSE SSL 問題）
+    code = quote_code if quote_code else sym
+
+    if quote_source == "manual":
+        return None, None
+
+    if quote_source == "stooq":
+        p = fetch_us_stock_price_stooq(code)
+        return p, (currency or "USD")
+
+    if quote_source == "yahoo" or quote_source == "":
         try:
-            t = normalize_yahoo_ticker(s)
+            t = normalize_yahoo_ticker(code)
             p, ccy = fetch_yahoo_chart_last_price(t)
-            # Yahoo 有時不回幣別：用後綴補一個合理預設
             if ccy == "":
                 if t.endswith(".TW") or t.endswith(".TWO"):
                     ccy = "TWD"
                 elif t.endswith(".US"):
                     ccy = "USD"
-            return p, (ccy or "TWD")
+            return p, (ccy or currency or "TWD")
         except Exception:
-            # fallback：Stooq（多半美股）
-            p = fetch_us_stock_price_stooq(s)
-            return p, "USD"
-
-    if asset_type == "fund":
-        ss = s
-        if ss.startswith("F_"):
-            ss = ss[2:]
-
-        # 先 Yahoo：如果你的基金代碼本來就能在 Yahoo 查到，這裡會成功
-        try:
-            t = normalize_yahoo_ticker(ss)
-            p, ccy = fetch_yahoo_chart_last_price(t)
-            if ccy == "":
-                if t.endswith(".TW") or t.endswith(".TWO"):
-                    ccy = "TWD"
-            return p, (ccy or "TWD")
-        except Exception:
-            # fund 抓不到就回 None（不硬塞錯價）
+            if asset_type == "stock":
+                p = fetch_us_stock_price_stooq(code)
+                return p, (currency or "USD")
             return None, None
 
     return None, None
 
-def write_price_to_sheet(symbol: str, asset_type: str, price: float, currency: str):
-    ws = sheet.worksheet("prices")
-    now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    sym = str(symbol).strip().upper()
-    at = str(asset_type).strip().lower()
-    ccy = str(currency).strip().upper()
-
-    # 找是否已有該列（symbol + asset_type）
+def write_price_to_assets(symbol: str, price: float, currency: str):
+    ws = ensure_worksheet("assets", ["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"])
     rows = ws.get_all_values()
-    if not rows:
-        ws.append_row(["symbol", "asset_type", "price", "currency", "updated_at"])
-        rows = ws.get_all_values()
-
     header = rows[0]
-    # 欄位索引
-    def idx(name):
-        try:
-            return header.index(name)
-        except Exception:
-            return None
+    idx = {h: i for i, h in enumerate(header)}
+    required = ["symbol", "currency", "price", "updated_at"]
+    if any(c not in idx for c in required):
+        raise ValueError("assets 表欄位不足，需包含 symbol/currency/price/updated_at")
 
-    i_sym = idx("symbol")
-    i_at = idx("asset_type")
-    i_price = idx("price")
-    i_ccy = idx("currency")
-    i_uat = idx("updated_at")
-
-    # 若 header 缺欄位，直接不處理（避免破壞既有表）
-    if None in (i_sym, i_at, i_price, i_ccy, i_uat):
-        raise ValueError("prices 表欄位不足，需包含 symbol/asset_type/price/currency/updated_at")
-
+    key = symbol_key(symbol)
     target_row = None
     for r_i in range(1, len(rows)):
         r = rows[r_i]
-        if len(r) <= max(i_sym, i_at):
-            continue
-        if str(r[i_sym]).strip().upper() == sym and str(r[i_at]).strip().lower() == at:
-            target_row = r_i + 1  # worksheet row number
+        sym = str(r[idx["symbol"]]).strip() if len(r) > idx["symbol"] else ""
+        if symbol_key(sym) == key:
+            target_row = r_i + 1
             break
 
-    values = [sym, at, float(price), ccy, now_s]
-
     if target_row is None:
-        ws.append_row(values)
-    else:
-        # A:E 固定更新
-        ws.update(f"A{target_row}:E{target_row}", [values])
+        raise ValueError(f"assets 找不到商品：{symbol}")
 
-def get_last_prices_updated_dt(prices_df: pd.DataFrame):
-    if prices_df is None or prices_df.empty or "updated_at" not in prices_df.columns:
+    row = rows[target_row - 1]
+    while len(row) < len(header):
+        row.append("")
+    row[idx["price"]] = str(float(price))
+    row[idx["currency"]] = str(currency).strip().upper()
+    row[idx["updated_at"]] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    end_col = chr(ord("A") + len(header) - 1)
+    ws.update(f"A{target_row}:{end_col}{target_row}", [row])
+
+def get_last_prices_updated_dt(assets_df: pd.DataFrame):
+    if assets_df is None or assets_df.empty or "updated_at" not in assets_df.columns:
         return None
-    dts = prices_df["updated_at"].apply(parse_dt_any).dropna()
+    dts = assets_df["updated_at"].apply(parse_dt_any).dropna()
     if dts.empty:
         return None
     return max(dts.tolist())
 
-def can_refresh_prices(prices_df: pd.DataFrame, cooldown_seconds: int = 60, grace_seconds: int = 3):
-    last_dt = get_last_prices_updated_dt(prices_df)
+def can_refresh_prices(assets_df: pd.DataFrame, cooldown_seconds: int = 60, grace_seconds: int = 3):
+    last_dt = get_last_prices_updated_dt(assets_df)
     if last_dt is None:
         return True, 0
     elapsed = (datetime.now() - last_dt).total_seconds()
-    # 規則：冷卻 60 秒 + 寬限 3 秒 → 小於 57 秒才拒絕
     threshold = max(0, cooldown_seconds - grace_seconds)
     if elapsed < threshold:
         return False, int(threshold - elapsed)
     return True, 0
 
-def refresh_prices(transactions_df: pd.DataFrame, prices_df: pd.DataFrame):
-    # 收集需要刷新 symbol（含 USD_TWD）
-    tx = transactions_df.copy() if transactions_df is not None else pd.DataFrame()
-    if not tx.empty:
-        tx["symbol"] = tx.get("symbol", "").astype(str).str.strip()
-        tx["asset_type"] = tx.get("asset_type", "").astype(str).str.strip().str.lower()
-        # 只抓 stock/fund
-        tx = tx[tx["asset_type"].isin(["stock", "fund"])]
-    symbols = []
-    for _, r in tx.iterrows():
-        sym = str(r.get("symbol", "")).strip()
-        at = str(r.get("asset_type", "")).strip().lower()
-        if sym == "":
-            continue
-        symbols.append((sym, at))
+def refresh_prices(assets_df: pd.DataFrame):
+    if assets_df is None or assets_df.empty:
+        return [], ["assets 表為空"]
 
-    # 去重（以 symbol+asset_type）
-    seen = set()
-    uniq = []
-    for sym, at in symbols:
-        key = (sym.upper(), at)
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append((sym, at))
-
-    # 一定要更新 USD_TWD（asset_type=system）
-    uniq.append(("USD_TWD", "system"))
-
+    a = assets_df.copy()
+    a = a[a["enabled"].fillna("").astype(str).str.upper().isin(["", "Y"])]
+    a = a[a["asset_type"].isin(["stock", "fund", "system"])]
     ok_list = []
     fail_list = []
 
-    for sym, at in uniq:
+    for _, row in a.iterrows():
+        sym = str(row.get("symbol", "")).strip()
+        if sym == "":
+            continue
         try:
-            if sym == "USD_TWD":
-                p, ccy = fetch_price("USD_TWD", "system")
-                write_price_to_sheet("USD_TWD", "system", p, "TWD")
-                ok_list.append("USD_TWD")
-                continue
-
-            p, ccy = fetch_price(sym, at)
-            if p is None:
+            price, ccy = fetch_price_for_asset(row.to_dict())
+            if price is None:
                 fail_list.append(f"{sym}（抓不到）")
                 continue
-            write_price_to_sheet(sym, at, p, ccy)
+            write_price_to_assets(sym, price, ccy or row.get("currency", ""))
             ok_list.append(sym)
         except Exception as e:
             fail_list.append(f"{sym}（{str(e)}）")
-
     return ok_list, fail_list
 
-# =========================
-# 交易過濾（Dashboard + 明細共用）
-# =========================
 def apply_filters(df: pd.DataFrame, start_d: date | None, end_d: date | None, symbols: list[str], strategy: str):
     if df is None or df.empty:
         return df
 
     out = df.copy()
-
-    # 日期
     if "date" in out.columns:
         out["_d"] = parse_date_series(out["date"])
         if start_d:
@@ -857,30 +841,26 @@ def apply_filters(df: pd.DataFrame, start_d: date | None, end_d: date | None, sy
         if end_d:
             out = out[out["_d"] <= end_d]
 
-    # Symbol
     if symbols:
         out["symbol"] = out["symbol"].astype(str).str.strip()
         out = out[out["symbol"].isin(symbols)]
 
-    # Strategy
     if strategy and strategy != "全部":
-        out["strategy"] = out.get("strategy", "").astype(str).str.strip()
-        out = out[out["strategy"] == strategy]
+        if "strategy_effective" not in out.columns:
+            out = enrich_transactions_with_assets(out, assets_df)
+        out["strategy_effective"] = out["strategy_effective"].astype(str).str.strip()
+        out = out[out["strategy_effective"] == strategy]
 
     return out.drop(columns=[c for c in ["_d"] if c in out.columns], errors="ignore")
 
-def strategy_summary(df_tx: pd.DataFrame, prices_df: pd.DataFrame) -> pd.DataFrame:
-    """策略績效（簡化版）：用同一份計算邏輯算每個策略的投入/市值/報酬率"""
+def strategy_summary(df_tx: pd.DataFrame, assets_df: pd.DataFrame) -> pd.DataFrame:
     if df_tx is None or df_tx.empty:
         return pd.DataFrame(columns=["策略", "總投入(TWD)", "目前市值(TWD)", "報酬率"])
 
-    df = df_tx.copy()
-    df["strategy"] = df.get("strategy", "").astype(str).str.strip()
-    df.loc[df["strategy"] == "", "strategy"] = "未分類"
-
+    df = enrich_transactions_with_assets(df_tx, assets_df).copy()
     rows = []
-    for strat, g in df.groupby("strategy"):
-        m = calculate_metrics(g, prices_df)
+    for strat, g in df.groupby("strategy_effective"):
+        m = calculate_metrics(g, assets_df)
         if m is None:
             continue
         invest, value, divi, profit, rate = m
@@ -896,11 +876,23 @@ def strategy_summary(df_tx: pd.DataFrame, prices_df: pd.DataFrame) -> pd.DataFra
         return pd.DataFrame(columns=["策略", "總投入(TWD)", "目前市值(TWD)", "報酬率"])
 
     out = out.sort_values("目前市值(TWD)", ascending=False)
-
     out["總投入(TWD)"] = out["總投入(TWD)"].map(lambda x: f"{x:,.0f}")
     out["目前市值(TWD)"] = out["目前市值(TWD)"].map(lambda x: f"{x:,.0f}")
     out["報酬率"] = out["報酬率"].map(lambda x: f"{x:.2f}%")
     return out
+
+def append_transaction_dynamic(row_dict: dict):
+    ws = sheet.worksheet("transactions")
+    values = ws.get_all_values()
+    if not values:
+        headers = ["id", "date", "action", "symbol", "currency", "fx_rate", "qty", "price", "amount_original", "amount_twd"]
+        ws.append_row(headers)
+        values = ws.get_all_values()
+    header = values[0]
+    out_row = []
+    for col in header:
+        out_row.append(row_dict.get(col, ""))
+    ws.append_row(out_row)
 
 # =========================
 # 頁面（用 Tabs 當導覽：不使用 Sidebar）
@@ -911,8 +903,6 @@ page_dash, page_tx = st.tabs(["Dashboard", "交易明細"])
 # Dashboard
 # =========================
 with page_dash:
-
-    # --- 右下角懸浮「+」按鈕：開啟新增交易彈窗 ---
     st.markdown(
         """
         <a href="?add=1" class="fab">+</a>
@@ -951,7 +941,6 @@ with page_dash:
     if open_add:
         @st.dialog("新增交易")
         def add_trade_dialog():
-            # 關閉（不存檔）
             if st.button("關閉", use_container_width=True):
                 st.query_params.clear()
                 st.rerun()
@@ -959,7 +948,6 @@ with page_dash:
             st.session_state.setdefault("processing", False)
             st.session_state.setdefault("btn_label", "送出")
 
-            # 這些 key 讓我們能「成功後局部清空」
             st.session_state.setdefault("in_action", "buy")
             st.session_state.setdefault("in_asset_type", "stock")
             st.session_state.setdefault("in_symbol", "")
@@ -969,80 +957,61 @@ with page_dash:
             st.session_state.setdefault("in_price", 0.0)
             st.session_state.setdefault("in_date", date.today())
             st.session_state.setdefault("in_fx_rate", 1.0)
-
-            # 新增：使用者是否手動改過 strategy（避免每次都被自動覆蓋）
             st.session_state.setdefault("strategy_user_edited", False)
-            st.session_state.setdefault("auto_default_strategy", "")
+            st.session_state.setdefault("asset_exists", False)
+            st.session_state.setdefault("asset_name_hint", "")
 
             def mark_dirty():
                 st.session_state.btn_label = "送出"
 
             def on_symbol_change():
                 st.session_state.btn_label = "送出"
-                st.session_state.strategy_user_edited = False
-
-                asset_type = st.session_state.get("in_asset_type", "stock")
-                sym_raw = st.session_state.get("in_symbol", "")
-                sym = clean_symbol(sym_raw, asset_type)
-
-                default_strat = get_default_strategy(sym)
-                st.session_state.auto_default_strategy = default_strat
-
-                # 只有在「使用者還沒改過」或 strategy 空白時，才自動帶入
-                if (not st.session_state.strategy_user_edited) and (str(st.session_state.get("in_strategy", "")).strip() == ""):
-                    st.session_state.in_strategy = default_strat
+                raw_symbol = st.session_state.get("in_symbol", "")
+                sel_asset_type = st.session_state.get("in_asset_type", "stock")
+                sym = clean_symbol(raw_symbol, sel_asset_type)
+                row = get_asset_row(sym)
+                st.session_state.asset_exists = row is not None
+                if row:
+                    st.session_state.in_asset_type = str(row.get("asset_type", st.session_state.get("in_asset_type", "stock")) or "stock")
+                    st.session_state.in_currency = str(row.get("currency", st.session_state.get("in_currency", "TWD")) or "TWD")
+                    st.session_state.asset_name_hint = str(row.get("name", "")).strip()
+                    if not st.session_state.strategy_user_edited or str(st.session_state.get("in_strategy", "")).strip() == "":
+                        st.session_state.in_strategy = str(row.get("strategy", "")).strip()
+                else:
+                    st.session_state.asset_name_hint = ""
+                    if not st.session_state.strategy_user_edited:
+                        st.session_state.in_strategy = ""
 
             def on_strategy_change():
                 st.session_state.btn_label = "送出"
                 st.session_state.strategy_user_edited = True
 
-            action = st.selectbox(
-                "交易類型", ["buy", "sell", "dividend", "initial"],
-                key="in_action", on_change=mark_dirty
-            )
-            asset_type = st.selectbox(
-                "資產類型", ["stock", "fund"],
-                key="in_asset_type", on_change=on_symbol_change  # 資產類型變更也要重抓預設策略
-            )
+            action = st.selectbox("交易類型", ["buy", "sell", "dividend", "initial"], key="in_action", on_change=mark_dirty)
+            asset_type = st.selectbox("資產類型", ["stock", "fund"], key="in_asset_type", on_change=on_symbol_change)
             symbol_input = st.text_input("代號", key="in_symbol", on_change=on_symbol_change)
-            strategy = st.text_input("策略", key="in_strategy", on_change=on_strategy_change)
+            strategy = st.text_input("策略（商品主檔）", key="in_strategy", on_change=on_strategy_change)
             tx_date = st.date_input("日期", key="in_date", on_change=mark_dirty)
 
-            # 若使用者改了策略（而且跟預設不同），才顯示「同步更新」
             symbol_norm = clean_symbol(symbol_input, asset_type)
-            auto_default = str(st.session_state.get("auto_default_strategy", "")).strip()
-            current_strategy = str(strategy).strip()
+            existing_asset = get_asset_row(symbol_norm)
+            if existing_asset:
+                st.caption(f"已找到商品主檔：{existing_asset.get('name', symbol_norm)}")
+            else:
+                st.caption("若商品主檔尚未存在，送出後會自動補一筆到 assets。")
 
-            show_sync = (symbol_norm != "") and (current_strategy != "") and (current_strategy != auto_default)
-
-            sync_default = False
-            if show_sync:
-                st.warning(f"你目前把【{symbol_norm}】的策略改成：{current_strategy}\n\n若你希望以後新增交易都自動帶這個策略，可勾選下面同步。")
-                sync_default = st.checkbox("同步更新此 symbol 的預設策略（會影響所有頁面）", value=False)
-
-            currency = st.selectbox(
-                "幣別", ["TWD", "USD"],
-                key="in_currency", on_change=mark_dirty
-            )
-
+            currency = st.selectbox("幣別", ["TWD", "USD"], key="in_currency", on_change=mark_dirty)
             qty = st.number_input("數量", min_value=0.0, key="in_qty", on_change=mark_dirty)
             price = st.number_input("單價", min_value=0.0, key="in_price", on_change=mark_dirty)
 
-            # fx_rate：TWD 時 disabled + 預填 1.0
             if currency == "TWD":
                 st.session_state.in_fx_rate = 1.0
                 fx_rate = st.number_input("匯率（USD_TWD）", value=1.0, disabled=True)
             else:
                 fx_rate = st.number_input("匯率（USD_TWD）", min_value=0.0, key="in_fx_rate", on_change=mark_dirty)
 
+            sync_default = st.checkbox("同步更新商品主檔的策略", value=True)
             st.caption("TWD 會自動使用 1.0；USD 請填 USD_TWD 匯率。")
             st.divider()
-
-            # 二級確認：只有勾了「同步更新預設策略」才出現
-            confirm_sync = True
-            if sync_default:
-                st.error(f"⚠️ 警告：這會改變「{symbol_norm}」在所有頁面的預設分類。")
-                confirm_sync = st.checkbox("我了解，仍要同步更新", value=False)
 
             btn_text = "🔄 寫入中..." if st.session_state.processing else st.session_state.btn_label
             clicked = st.button(btn_text, disabled=st.session_state.processing, use_container_width=True)
@@ -1056,101 +1025,91 @@ with page_dash:
             if st.session_state.processing:
                 try:
                     symbol = clean_symbol(symbol_input, asset_type)
-
-                    # 代號必填
                     if symbol == "":
                         st.error("代號不可空白")
                         raise ValueError("代號不可空白")
 
-                    # USD 必須填匯率（包含 initial）
                     if currency == "USD" and to_number(fx_rate) == 0:
                         st.error("USD 必須填匯率")
                         raise ValueError("USD 必須填匯率")
 
                     fx_used = to_number(fx_rate) if currency == "USD" else 1.0
-
-                    # 計算金額
                     amount_original = to_number(qty) * to_number(price)
                     amount_twd = amount_original * fx_used
 
-                    # initial 規則
+                    same = enriched_tx_df[enriched_tx_df["symbol_key"] == symbol_key(symbol)] if not enriched_tx_df.empty else pd.DataFrame()
+
                     if action == "initial":
                         if to_number(qty) <= 0:
                             st.error("initial 數量必須大於 0")
                             raise ValueError("initial 數量必須大於 0")
-
-                        same = transactions_df[
-                            transactions_df["symbol"].astype(str).apply(lambda x: clean_symbol(x, asset_type)) == symbol
-                        ]
 
                         if not same.empty:
                             same_dates = pd.to_datetime(
                                 same["date"].astype(str).str.strip().str.replace("/", "-").str.replace(".", "-"),
                                 errors="coerce"
                             ).dropna().dt.date
-
-                            if len(same_dates) == 0:
-                                st.error("舊資料的 date 格式無法判斷，請先把 transactions 的 date 全部改成 YYYY-MM-DD")
-                                raise ValueError("date 格式無法判斷")
-
-                            if any(d <= tx_date for d in same_dates.tolist()):
+                            if len(same_dates) > 0 and any(d <= tx_date for d in same_dates.tolist()):
                                 st.error("initial 日期必須早於此資產的其他交易日期")
                                 raise ValueError("initial 日期不合法")
-
                     else:
-                        # 金額驗證容差 ±1 元（USD 用換算後）
                         if abs(to_number(qty) * to_number(price) * fx_used - amount_twd) > 1:
                             st.error("金額驗證錯誤")
                             raise ValueError("金額驗證錯誤")
 
-                        # sell 超過持有：擋下
                         if action == "sell":
                             current_qty = get_current_qty(transactions_df, symbol, asset_type)
                             if to_number(qty) > current_qty:
                                 st.error(f"賣出數量({qty}) 超過目前持有({current_qty})，不允許送出")
                                 raise ValueError("賣出超過持有")
 
-                    # 若勾選同步更新，但未二級確認，直接擋下
-                    if sync_default and not confirm_sync:
-                        st.error("你勾選了同步更新，但尚未二級確認")
-                        raise ValueError("同步更新未確認")
+                    row = get_asset_row(symbol)
+                    final_asset_type = str(row.get("asset_type", asset_type)).strip().lower() if row else asset_type
+                    final_currency = str(row.get("currency", currency)).strip().upper() if row else currency
+                    final_strategy = str(row.get("strategy", strategy)).strip() if row and str(strategy).strip() == "" else str(strategy).strip()
 
-                    new_row = [
-                        str(datetime.now().timestamp()),
-                        str(tx_date),
-                        action,
-                        asset_type,
-                        symbol,
-                        strategy,
-                        currency,
-                        fx_used,
-                        to_number(qty),
-                        to_number(price),
-                        amount_original,
-                        amount_twd
-                    ]
+                    tx_row = {
+                        "id": str(datetime.now().timestamp()),
+                        "date": str(tx_date),
+                        "action": action,
+                        "symbol": symbol,
+                        "currency": final_currency,
+                        "fx_rate": fx_used,
+                        "qty": to_number(qty),
+                        "price": to_number(price),
+                        "amount_original": amount_original,
+                        "amount_twd": amount_twd,
+                        # 舊表頭相容
+                        "asset_type": final_asset_type,
+                        "strategy": final_strategy,
+                    }
 
-                    sheet.worksheet("transactions").append_row(new_row)
+                    append_transaction_dynamic(tx_row)
 
-                    # 新增：同步更新預設策略
-                    if sync_default and confirm_sync:
-                        upsert_symbol_strategy(symbol, strategy)
+                    if sync_default:
+                        default_quote_source = "yahoo" if final_asset_type == "stock" else "manual"
+                        default_quote_code = symbol if final_asset_type == "stock" else ""
+                        update_asset_master(
+                            symbol=symbol,
+                            asset_type=final_asset_type,
+                            currency=final_currency,
+                            strategy=final_strategy,
+                            name=(row.get("name") if row else symbol),
+                            quote_source=(row.get("quote_source") if row else default_quote_source),
+                            quote_code=(row.get("quote_code") if row else default_quote_code),
+                            enabled=(row.get("enabled") if row else "Y"),
+                        )
 
                     saved_at = datetime.now().strftime("%H:%M")
                     st.session_state.btn_label = f"✅ 已存檔 ({saved_at})"
                     status_area.caption(st.session_state.btn_label)
 
-                    # 局部清空：清 symbol/qty/price（保留 date/asset_type/strategy/currency）
                     st.session_state.in_symbol = ""
                     st.session_state.in_qty = 0.0
                     st.session_state.in_price = 0.0
                     st.session_state.strategy_user_edited = False
-                    st.session_state.auto_default_strategy = ""
 
-                    # 存檔後：關閉彈窗（把 add=1 拿掉）
                     st.query_params.clear()
-
-                    # 寫入成功後才清快取 + loading
                     with st.spinner("正在重新同步資料…"):
                         st.cache_resource.clear()
                     st.rerun()
@@ -1158,25 +1117,23 @@ with page_dash:
                 except Exception:
                     st.session_state.btn_label = "送出"
                     status_area.caption("已取消送出（請修正欄位後再送出）")
-
                 finally:
                     st.session_state.processing = False
 
         add_trade_dialog()
 
-    # =========================
-    # Dashboard 篩選 + 刷新
-    # =========================
     st.session_state.setdefault("dash_start", None)
     st.session_state.setdefault("dash_end", None)
     st.session_state.setdefault("dash_symbols", [])
     st.session_state.setdefault("dash_strategy", "全部")
 
-    # 供選擇的 symbol（從交易表）
     all_symbols = sorted(
-        transactions_df.get("symbol", pd.Series(dtype=str)).astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()
+        enriched_tx_df.get("symbol", pd.Series(dtype=str)).astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()
     )
-    all_strategies = ["全部", "存股", "波段", "未分類"]
+    dynamic_strategies = sorted([s for s in assets_df.get("strategy", pd.Series(dtype=str)).astype(str).str.strip().unique().tolist() if s])
+    all_strategies = ["全部"] + dynamic_strategies
+    if "未分類" not in all_strategies:
+        all_strategies.append("未分類")
 
     f1, f2 = st.columns([7, 3])
     with f1:
@@ -1185,7 +1142,6 @@ with page_dash:
             st.date_input("開始日期", key="dash_start")
         with c2:
             st.date_input("結束日期", key="dash_end")
-
         st.multiselect("Symbol（可多選）", options=all_symbols, key="dash_symbols")
         st.selectbox("Strategy", options=all_strategies, key="dash_strategy")
 
@@ -1197,76 +1153,46 @@ with page_dash:
             st.rerun()
 
     with f2:
-        # 冷卻判斷（全域：用 prices.updated_at）
-        ok_refresh, remain = can_refresh_prices(prices_df, cooldown_seconds=60, grace_seconds=3)
+        ok_refresh, remain = can_refresh_prices(assets_df, cooldown_seconds=60, grace_seconds=3)
         btn_label = "刷新價格" if ok_refresh else f"刷新價格（{remain}s）"
         clicked = st.button(btn_label, disabled=(not ok_refresh), use_container_width=True)
 
         if clicked:
             with st.spinner("正在刷新價格…"):
-                ok_list, fail_list = refresh_prices(transactions_df, prices_df)
+                ok_list, fail_list = refresh_prices(assets_df)
 
-            # 把結果先存起來，避免 st.rerun() 把訊息洗掉
             st.session_state["refresh_ok_list"] = ok_list
             st.session_state["refresh_fail_list"] = fail_list
 
-            # 寫入成功後才清快取 + loading
             with st.spinner("正在重新同步資料…"):
                 st.cache_resource.clear()
-
             st.rerun()
 
-    # 刷新結果（顯示一次後清掉）
     if st.session_state.get("refresh_ok_list") is not None or st.session_state.get("refresh_fail_list") is not None:
         ok_list = st.session_state.get("refresh_ok_list") or []
         fail_list = st.session_state.get("refresh_fail_list") or []
-
         if ok_list:
             st.success("已更新：" + "、".join(ok_list[:8]) + ("…" if len(ok_list) > 8 else ""))
         if fail_list:
             st.warning("未更新：" + "、".join(fail_list[:6]) + ("…" if len(fail_list) > 6 else ""))
-
         st.session_state["refresh_ok_list"] = None
         st.session_state["refresh_fail_list"] = None
 
-    # 取匯率/更新時間（用剛載入的 prices_df）
-    fx, fx_updated = get_usd_twd_info(prices_df)
-    prices_updated = get_prices_updated_at(prices_df)
+    fx, fx_updated = get_usd_twd_info(assets_df)
+    prices_updated = get_prices_updated_at(assets_df)
 
-    # Dashboard 內部 Tabs：全部/股票/基金（保留原本架構）
-    tab_all, tab_stock, tab_fund = st.tabs(["全部", "股票", "基金"])
+    # 用商品主檔的 asset_type 分類
+    tx_all = enriched_tx_df[enriched_tx_df["asset_type_effective"].isin(["stock", "fund"])].copy()
+    tx_stock = tx_all[tx_all["asset_type_effective"] == "stock"].copy()
+    tx_fund = tx_all[tx_all["asset_type_effective"] == "fund"].copy()
 
-    # 先依資產類型分
-    stock_df = transactions_df[transactions_df["asset_type"] == "stock"]
-    fund_df = transactions_df[transactions_df["asset_type"] == "fund"]
-    all_df = transactions_df[transactions_df["asset_type"].isin(["stock", "fund"])]
+    dash_filtered_all = apply_filters(tx_all, st.session_state.get("dash_start"), st.session_state.get("dash_end"), st.session_state.get("dash_symbols", []), st.session_state.get("dash_strategy", "全部"))
+    dash_filtered_stock = apply_filters(tx_stock, st.session_state.get("dash_start"), st.session_state.get("dash_end"), st.session_state.get("dash_symbols", []), st.session_state.get("dash_strategy", "全部"))
+    dash_filtered_fund = apply_filters(tx_fund, st.session_state.get("dash_start"), st.session_state.get("dash_end"), st.session_state.get("dash_symbols", []), st.session_state.get("dash_strategy", "全部"))
 
-    # 新增：套用篩選
-    dash_filtered_all = apply_filters(
-        all_df,
-        st.session_state.get("dash_start"),
-        st.session_state.get("dash_end"),
-        st.session_state.get("dash_symbols", []),
-        st.session_state.get("dash_strategy", "全部"),
-    )
-    dash_filtered_stock = apply_filters(
-        stock_df,
-        st.session_state.get("dash_start"),
-        st.session_state.get("dash_end"),
-        st.session_state.get("dash_symbols", []),
-        st.session_state.get("dash_strategy", "全部"),
-    )
-    dash_filtered_fund = apply_filters(
-        fund_df,
-        st.session_state.get("dash_start"),
-        st.session_state.get("dash_end"),
-        st.session_state.get("dash_symbols", []),
-        st.session_state.get("dash_strategy", "全部"),
-    )
-
-    all_metrics = calculate_metrics(dash_filtered_all, prices_df)
-    stock_metrics = calculate_metrics(dash_filtered_stock, prices_df)
-    fund_metrics = calculate_metrics(dash_filtered_fund, prices_df)
+    all_metrics = calculate_metrics(dash_filtered_all, assets_df)
+    stock_metrics = calculate_metrics(dash_filtered_stock, assets_df)
+    fund_metrics = calculate_metrics(dash_filtered_fund, assets_df)
 
     def render_dashboard(metrics, label, df_for_table):
         if metrics is None:
@@ -1279,8 +1205,6 @@ with page_dash:
             return
 
         invest, value, divi, profit, rate = metrics
-
-        # Hero：市值
         sub_parts = []
         if prices_updated:
             sub_parts.append(f"價格更新：{prices_updated}")
@@ -1292,7 +1216,6 @@ with page_dash:
         hero_sub = " ｜ ".join(sub_parts) if sub_parts else ""
         hero_card(f"{label}｜目前市值（TWD）", fmt_money(value), hero_sub)
 
-        # KPI
         kpis_html = "".join([
             kpi_card_html("總投入", fmt_money(invest)),
             kpi_card_html("已領息", fmt_money(divi)),
@@ -1301,22 +1224,19 @@ with page_dash:
         ])
         st.markdown(f'<div class="kpi-grid">{kpis_html}</div>', unsafe_allow_html=True)
 
-        # 新增：策略績效
         st.markdown("#### 策略績效")
-        strat_table = strategy_summary(df_for_table, prices_df)
+        strat_table = strategy_summary(df_for_table, assets_df)
         st.dataframe(strat_table, use_container_width=True, hide_index=True)
 
-        # 持有前三名（市值）
         st.markdown("#### 持有前三名（市值）")
-        top3 = top_holdings_table(df_for_table, prices_df, top_n=3)
+        top3 = top_holdings_table(df_for_table, assets_df, top_n=3)
         st.dataframe(top3, use_container_width=True, hide_index=True)
 
+    tab_all, tab_stock, tab_fund = st.tabs(["全部", "股票", "基金"])
     with tab_all:
         render_dashboard(all_metrics, "全部", dash_filtered_all)
-
     with tab_stock:
         render_dashboard(stock_metrics, "股票", dash_filtered_stock)
-
     with tab_fund:
         render_dashboard(fund_metrics, "基金", dash_filtered_fund)
 
@@ -1333,23 +1253,25 @@ with page_tx:
     st.session_state.setdefault("tx_offset", 0)
     st.session_state.setdefault("tx_last_sig", "")
 
-    # 基本篩選
     a, b = st.columns(2)
     with a:
         tx_end = st.date_input("結束日期", key="tx_end")
     with b:
         tx_days = st.selectbox("預設區間", options=[30, 60, 90], index=0, key="tx_days")
 
-    st.multiselect("Symbol（可多選）", options=sorted(
-        transactions_df.get("symbol", pd.Series(dtype=str)).astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()
-    ), key="tx_symbols")
-    st.selectbox("Strategy", options=["全部", "存股", "波段", "未分類"], key="tx_strategy")
+    tx_symbols_list = sorted(
+        enriched_tx_df.get("symbol", pd.Series(dtype=str)).astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()
+    )
+    tx_strategies = ["全部"] + sorted([s for s in enriched_tx_df.get("strategy_effective", pd.Series(dtype=str)).astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()])
+    if "未分類" not in tx_strategies:
+        tx_strategies.append("未分類")
 
-    # 依 offset 往前延伸（每次載入更多，多往前 tx_days 天）
+    st.multiselect("Symbol（可多選）", options=tx_symbols_list, key="tx_symbols")
+    st.selectbox("Strategy", options=tx_strategies, key="tx_strategy")
+
     start_d = st.session_state.tx_end - timedelta(days=st.session_state.tx_days * (st.session_state.tx_offset + 1))
     end_d = st.session_state.tx_end
 
-    # offset 重置規則：只要 date_range / symbol / strategy 任何變動就歸零 + rerun
     sig = f"{tx_end}|{tx_days}|{','.join(st.session_state.tx_symbols)}|{st.session_state.tx_strategy}"
     if st.session_state.tx_last_sig == "":
         st.session_state.tx_last_sig = sig
@@ -1358,14 +1280,12 @@ with page_tx:
         st.session_state.tx_offset = 0
         st.rerun()
 
-    df_tx = transactions_df.copy()
+    df_tx = enriched_tx_df.copy()
     if not df_tx.empty:
         df_tx["date_norm"] = parse_date_series(df_tx["date"])
         df_tx = df_tx.sort_values("date_norm", ascending=False)
 
     filtered = apply_filters(df_tx, start_d, end_d, st.session_state.tx_symbols, st.session_state.tx_strategy)
-
-    # 顯示欄位（依規格）
     cols = ["date", "symbol", "action", "qty", "price", "amount_twd"]
     existing_cols = [c for c in cols if c in filtered.columns]
     show_df = filtered[existing_cols].copy() if not filtered.empty else pd.DataFrame(columns=existing_cols)
@@ -1373,7 +1293,6 @@ with page_tx:
     st.caption(f"顯示區間：{start_d} ~ {end_d}（依結束日期往前延伸）")
     st.dataframe(show_df, use_container_width=True, hide_index=True)
 
-    # 載入更多
     if st.button("載入更多", use_container_width=True):
         st.session_state.tx_offset += 1
         st.rerun()
