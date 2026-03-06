@@ -610,11 +610,75 @@ def fetch_us_stock_price_stooq(symbol: str):
         raise ValueError("Stooq 回傳價格不合法")
     return float(close)
 
+
+def fetch_yahoo_chart_last_price(ticker: str):
+    """從 Yahoo Chart 取最近收盤/最新價（不用 API key）。
+    回傳 (price, currency)；失敗會丟出例外。
+    """
+    t = str(ticker).strip()
+    if t == "":
+        raise ValueError("ticker 空白")
+
+    # Yahoo chart endpoint
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(t)}?interval=1d&range=5d"
+    j = http_get_json(url, timeout=12)
+
+    chart = j.get("chart", {})
+    err = chart.get("error")
+    if err:
+        raise ValueError(err.get("description") or "Yahoo 回傳 error")
+
+    res = chart.get("result") or []
+    if not res:
+        raise ValueError("Yahoo 查不到資料")
+
+    r0 = res[0]
+    meta = r0.get("meta", {}) or {}
+    currency = str(meta.get("currency", "")).strip().upper()
+
+    ind = (r0.get("indicators", {}) or {})
+    quote = (ind.get("quote") or [])
+    if not quote:
+        raise ValueError("Yahoo 缺少 quote")
+    closes = (quote[0].get("close") or [])
+    # 找最後一個非 None 的 close
+    last = None
+    for v in reversed(closes):
+        if v is None:
+            continue
+        last = v
+        break
+    if last is None:
+        raise ValueError("Yahoo close 都是空")
+
+    price = float(last)
+    if price <= 0:
+        raise ValueError("Yahoo 價格不合法")
+    return price, currency
+
+
+def normalize_yahoo_ticker(symbol: str) -> str:
+    """把輸入 symbol 轉成 Yahoo 常用的 ticker（針對台股/ETF 優先）"""
+    s = str(symbol).strip().upper()
+
+    # 你表內常見：0050.TW / 0056.TW / 2330.TW
+    if re.fullmatch(r"\d{4}", s):
+        return s + ".TW"
+
+    # 0050.TW / 00715L.TW 等：直接回傳
+    if s.endswith(".TW") or s.endswith(".TWO") or s.endswith(".US"):
+        return s
+
+    # 其他：先原樣回傳（讓 Yahoo 自己判斷，例：AAPL）
+    return s
+
+
 def fetch_price(symbol: str, asset_type: str):
     """
-    依資產類型抓價（新增功能）
-    - stock: 台股走 TWSE MIS；其他走 Stooq（US 預設）
-    - fund: 目前先走 Stooq/台股（若代碼像台股）；抓不到就回 None
+    依資產類型抓價（新增功能，改成更適合雲端環境的來源）
+    - USD_TWD：免 key 匯率來源（已在 fetch_usd_twd() 做多來源）
+    - stock：先走 Yahoo（台股/ETF 尤其適合），失敗再用 Stooq（偏美股）
+    - fund：先嘗試 Yahoo（若你用的是 Yahoo 能識別的基金代碼/ETF），否則回 None
     """
     s = str(symbol).strip().upper()
 
@@ -622,28 +686,37 @@ def fetch_price(symbol: str, asset_type: str):
         return fetch_usd_twd(), "TWD"
 
     if asset_type == "stock":
-        if s.endswith(".TW") or re.fullmatch(r"\d{4}", s) or re.fullmatch(r"\d{4}\.TW", s):
-            p = fetch_tw_stock_price_mis(s)
-            return p, "TWD"
-        # 其他先走 Stooq（多半 US）
-        p = fetch_us_stock_price_stooq(s)
-        return p, "USD"
+        # 先 Yahoo（避免 TWSE SSL 問題）
+        try:
+            t = normalize_yahoo_ticker(s)
+            p, ccy = fetch_yahoo_chart_last_price(t)
+            # Yahoo 有時不回幣別：用後綴補一個合理預設
+            if ccy == "":
+                if t.endswith(".TW") or t.endswith(".TWO"):
+                    ccy = "TWD"
+                elif t.endswith(".US"):
+                    ccy = "USD"
+            return p, (ccy or "TWD")
+        except Exception:
+            # fallback：Stooq（多半美股）
+            p = fetch_us_stock_price_stooq(s)
+            return p, "USD"
 
-    # fund：先用台股方式（若長得像台股/ETF），否則用 Stooq 試試
     if asset_type == "fund":
         ss = s
         if ss.startswith("F_"):
             ss = ss[2:]
+
+        # 先 Yahoo：如果你的基金代碼本來就能在 Yahoo 查到，這裡會成功
         try:
-            if ss.endswith(".TW") or re.fullmatch(r"\d{4}", ss) or re.fullmatch(r"\d{4}\.TW", ss):
-                p = fetch_tw_stock_price_mis(ss)
-                return p, "TWD"
+            t = normalize_yahoo_ticker(ss)
+            p, ccy = fetch_yahoo_chart_last_price(t)
+            if ccy == "":
+                if t.endswith(".TW") or t.endswith(".TWO"):
+                    ccy = "TWD"
+            return p, (ccy or "TWD")
         except Exception:
-            pass
-        try:
-            p = fetch_us_stock_price_stooq(ss)
-            return p, "USD"
-        except Exception:
+            # fund 抓不到就回 None（不硬塞錯價）
             return None, None
 
     return None, None
