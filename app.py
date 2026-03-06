@@ -7,6 +7,7 @@ import re
 import json
 import urllib.request
 import urllib.parse
+import html
 from datetime import datetime, date, timedelta
 
 # =========================
@@ -144,7 +145,7 @@ def load_data():
     )
     assets = safe_get_records(
         "assets",
-        ["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"]
+        ["symbol", "name", "asset_type", "quote_source", "quote_code", "nav_code", "currency", "price", "updated_at", "strategy", "enabled"]
     )
     allowed = safe_get_records("settings_allowed_emails", ["email"])
     return transactions, assets, allowed
@@ -236,7 +237,7 @@ def parse_dt_any(x):
 
 def normalize_assets_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy() if df is not None else pd.DataFrame()
-    required = ["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"]
+    required = ["symbol", "name", "asset_type", "quote_source", "quote_code", "nav_code", "currency", "price", "updated_at", "strategy", "enabled"]
     for c in required:
         if c not in out.columns:
             out[c] = ""
@@ -284,16 +285,16 @@ def get_asset_type(symbol: str) -> str:
     return str(row.get("asset_type", "")).strip().lower()
 
 def update_asset_master(symbol: str, asset_type: str = "", currency: str = "", strategy: str = "", name: str = "", quote_source: str = "", quote_code: str = "", enabled: str = "Y"):
-    ws = ensure_worksheet("assets", ["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"])
+    ws = ensure_worksheet("assets", ["symbol", "name", "asset_type", "quote_source", "quote_code", "nav_code", "currency", "price", "updated_at", "strategy", "enabled"])
     rows = ws.get_all_values()
     if not rows:
-        ws.append_row(["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"])
+        ws.append_row(["symbol", "name", "asset_type", "quote_source", "quote_code", "nav_code", "currency", "price", "updated_at", "strategy", "enabled"])
         rows = ws.get_all_values()
 
     header = rows[0]
     header_idx = {h: i for i, h in enumerate(header)}
 
-    required = ["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"]
+    required = ["symbol", "name", "asset_type", "quote_source", "quote_code", "nav_code", "currency", "price", "updated_at", "strategy", "enabled"]
     missing = [c for c in required if c not in header_idx]
     if missing:
         raise ValueError("assets 表欄位不足，需包含：" + ",".join(required))
@@ -354,7 +355,7 @@ def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame
     derived_cols = [
         "symbol_key",
         "asset_name_master", "asset_type_master", "currency_master", "strategy_master",
-        "enabled_master", "price_master", "updated_at_master", "quote_source_master", "quote_code_master",
+        "enabled_master", "price_master", "updated_at_master", "quote_source_master", "quote_code_master", "nav_code_master",
         "strategy_effective", "asset_type_effective", "currency_effective", "price_current",
         "name_effective", "enabled_effective",
     ]
@@ -377,7 +378,7 @@ def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame
         df["enabled_effective"] = "Y"
         return df
 
-    keep = a[["symbol_key", "name", "asset_type", "currency", "strategy", "enabled", "price_num", "updated_at", "quote_source", "quote_code"]].copy()
+    keep = a[["symbol_key", "name", "asset_type", "currency", "strategy", "enabled", "price_num", "updated_at", "quote_source", "quote_code", "nav_code"]].copy()
     keep = keep.rename(columns={
         "name": "asset_name_master",
         "asset_type": "asset_type_master",
@@ -388,6 +389,7 @@ def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame
         "updated_at": "updated_at_master",
         "quote_source": "quote_source_master",
         "quote_code": "quote_code_master",
+        "nav_code": "nav_code_master",
     })
     df = df.merge(keep, on="symbol_key", how="left")
 
@@ -402,6 +404,7 @@ def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame
         "updated_at_master": "",
         "quote_source_master": "",
         "quote_code_master": "",
+        "nav_code_master": "",
     }
     for c, default in master_defaults.items():
         if c not in df.columns:
@@ -654,6 +657,91 @@ def http_get_text(url: str, timeout: int = 10):
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", errors="ignore")
 
+
+
+def strip_html_text(raw: str) -> str:
+    s = html.unescape(str(raw or ""))
+    s = re.sub(r"<script[\s\S]*?</script>", " ", s, flags=re.I)
+    s = re.sub(r"<style[\s\S]*?</style>", " ", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def parse_nav_from_html(raw_html: str):
+    html_text = str(raw_html or "")
+    plain = strip_html_text(html_text)
+    patterns = [
+        r'最新淨值[^0-9-]{0,20}([0-9]+(?:\.[0-9]+)?)',
+        r'基金淨值[^0-9-]{0,20}([0-9]+(?:\.[0-9]+)?)',
+        r'淨值日期[^0-9]{0,20}[0-9]{4}[/-][0-9]{1,2}[/-][0-9]{1,2}[^0-9]{0,30}淨值[^0-9-]{0,20}([0-9]+(?:\.[0-9]+)?)',
+        r'"(?:latest)?nav"\s*[:=]\s*"?([0-9]+(?:\.[0-9]+)?)"?',
+        r'"price"\s*[:=]\s*"?([0-9]+(?:\.[0-9]+)?)"?',
+    ]
+    for pat in patterns:
+        m = re.search(pat, html_text, flags=re.I) or re.search(pat, plain, flags=re.I)
+        if m:
+            try:
+                price = float(m.group(1))
+                if price > 0:
+                    return price
+            except Exception:
+                pass
+    nums = re.findall(r'([0-9]+(?:\.[0-9]{2,6})?)', plain)
+    for n in nums:
+        try:
+            price = float(n)
+            if 0 < price < 100000:
+                return price
+        except Exception:
+            continue
+    raise ValueError("網頁中找不到淨值")
+
+
+def fetch_nav_from_url(url: str):
+    raw = http_get_text(url, timeout=15)
+    return parse_nav_from_html(raw)
+
+
+def fetch_fund_price_for_asset(asset_row: dict):
+    sym = str(asset_row.get("symbol", "")).strip()
+    quote_source = str(asset_row.get("quote_source", "")).strip().lower()
+    quote_code = str(asset_row.get("quote_code", "")).strip()
+    nav_code = str(asset_row.get("nav_code", "")).strip()
+    currency = str(asset_row.get("currency", "")).strip().upper()
+
+    last_err = None
+
+    # 1) Yahoo：最適合有基金代碼的商品
+    if quote_source in ["", "yahoo", "auto", "fund_auto"] and quote_code:
+        try:
+            p, ccy = fetch_yahoo_chart_last_price(quote_code)
+            return p, (ccy or currency or "USD")
+        except Exception as e:
+            last_err = e
+
+    # 2) nav_code 若填完整網址，就直接抓該頁面淨值
+    if nav_code.startswith("http://") or nav_code.startswith("https://"):
+        try:
+            p = fetch_nav_from_url(nav_code)
+            return p, (currency or "USD")
+        except Exception as e:
+            last_err = e
+
+    # 3) 若 nav_code 放的是 Yahoo 基金代碼，也可直接試
+    if nav_code and not nav_code.startswith("http://") and not nav_code.startswith("https://"):
+        try:
+            p, ccy = fetch_yahoo_chart_last_price(nav_code)
+            return p, (ccy or currency or "USD")
+        except Exception as e:
+            last_err = e
+
+    if quote_source == "manual":
+        return None, None
+
+    raise ValueError(f"抓不到：{last_err}")
+
+
 def fetch_usd_twd_open_er_api():
     url = "https://open.er-api.com/v6/latest/USD"
     j = http_get_json(url, timeout=10)
@@ -757,6 +845,9 @@ def fetch_price_for_asset(asset_row: dict):
     if symbol_key(sym) == "USD_TWD" or asset_type == "system":
         return fetch_usd_twd(), "TWD"
 
+    if asset_type == "fund":
+        return fetch_fund_price_for_asset(asset_row)
+
     code = quote_code if quote_code else sym
 
     if quote_source == "manual":
@@ -780,12 +871,16 @@ def fetch_price_for_asset(asset_row: dict):
             if asset_type == "stock":
                 p = fetch_us_stock_price_stooq(code)
                 return p, (currency or "USD")
-            return None, None
+            raise
 
-    return None, None
+    # 其他來源未定義時，股票預設仍先走 Yahoo
+    t = normalize_yahoo_ticker(code)
+    p, ccy = fetch_yahoo_chart_last_price(t)
+    return p, (ccy or currency or "TWD")
+
 
 def write_price_to_assets(symbol: str, price: float, currency: str):
-    ws = ensure_worksheet("assets", ["symbol", "name", "asset_type", "quote_source", "quote_code", "currency", "price", "updated_at", "strategy", "enabled"])
+    ws = ensure_worksheet("assets", ["symbol", "name", "asset_type", "quote_source", "quote_code", "nav_code", "currency", "price", "updated_at", "strategy", "enabled"])
     rows = ws.get_all_values()
     header = rows[0]
     idx = {h: i for i, h in enumerate(header)}
