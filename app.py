@@ -721,23 +721,97 @@ def fetch_nav_from_url(url: str, verify_ssl: bool = True):
     return parse_nav_from_html(raw)
 
 
+def parse_moneydj_nav(raw_html: str):
+    html_text = str(raw_html or "")
+    plain = strip_html_text(html_text)
+
+    # 1) 最優先：抓「最新淨值」表頭後面那一列的日期 + 淨值
+    patterns = [
+        r'最新淨值[\s\S]{0,200}?(?:20\d{2}[/-]\d{1,2}[/-]\d{1,2}|\d{2}/\d{2})\s*[,，\s]\s*([0-9]+\.[0-9]{2,6})',
+        r'最新值\s*([0-9]+\.[0-9]{2,6})',
+        r'最新淨值[^0-9]{0,20}([0-9]+\.[0-9]{2,6})',
+        r'淨值[^0-9]{0,20}(?:20\d{2}[/-]\d{1,2}[/-]\d{1,2}|\d{2}/\d{2})\s*[,，\s]\s*([0-9]+\.[0-9]{2,6})',
+    ]
+    for pat in patterns:
+        m = re.search(pat, html_text, flags=re.I) or re.search(pat, plain, flags=re.I)
+        if m:
+            try:
+                price = float(m.group(1))
+                if 0 < price < 100000:
+                    return price
+            except Exception:
+                pass
+
+    # 2) 次優先：在「最新淨值」附近找日期後第一個小數，不接受像 2026 這種整數年份
+    anchor_pos = plain.find('最新淨值')
+    if anchor_pos == -1:
+        anchor_pos = plain.find('最新值')
+    if anchor_pos != -1:
+        segment = plain[anchor_pos:anchor_pos + 300]
+        m = re.search(r'(?:20\d{2}[/-]\d{1,2}[/-]\d{1,2}|\d{2}/\d{2})\s*[,，\s]\s*([0-9]+\.[0-9]{2,6})', segment)
+        if m:
+            price = float(m.group(1))
+            if 0 < price < 100000:
+                return price
+
+    # 3) 再退一步：找「近30日淨值 / 日期, 淨值」區塊的第一筆小數
+    for marker in ['近30日淨值', '日期, 淨值', '淨值.']:
+        pos = plain.find(marker)
+        if pos != -1:
+            segment = plain[pos:pos + 400]
+            m = re.search(r'(?:20\d{2}[/-]\d{1,2}[/-]\d{1,2}|\d{2}/\d{2})\s*[,，\s]\s*([0-9]+\.[0-9]{2,6})', segment)
+            if m:
+                price = float(m.group(1))
+                if 0 < price < 100000:
+                    return price
+
+    raise ValueError('MoneyDJ 頁面中找不到正確淨值')
+
+
 def fetch_moneydj_nav(nav_code: str):
     code = str(nav_code or "").strip()
     if code == "":
         raise ValueError("MoneyDJ 代碼空白")
 
     if code.startswith("http://") or code.startswith("https://"):
-        urls = [code]
+        base_urls = [code]
     else:
-        urls = [
-            f"https://www.moneydj.com/funddj/ya/yp010000.djhtm?a={urllib.parse.quote(code)}",
-            f"https://www.moneydj.com/funddj/ya/yp010001.djhtm?a={urllib.parse.quote(code)}",
+        q = urllib.parse.quote(code)
+        base_urls = [
+            f"https://www.moneydj.com/funddj/ya/yp010000.djhtm?a={q}",
+            f"https://www.moneydj.com/funddj/ya/yp010001.djhtm?a={q}",
         ]
+
+    # MoneyDJ 的 &topc= 版本較接近純文字摘要，優先使用，較不容易抓錯到年份或其他數字
+    urls = []
+    for u in base_urls:
+        if "topc=" not in u:
+            sep = "&" if "?" in u else "?"
+            urls.append(f"{u}{sep}topc=")
+        urls.append(u)
 
     last_err = None
     for url in urls:
         try:
-            return fetch_nav_from_url(url, verify_ssl=False)
+            raw = http_get_text_unverified(url, timeout=15)
+            plain = strip_html_text(raw)
+
+            # 優先抓 MoneyDJ 常見摘要格式
+            patterns = [
+                r'最新值\s*([0-9]+(?:\.[0-9]{2,6})?)',
+                r'最新淨值[^0-9]{0,40}(?:20\d{2}[/-]\d{1,2}[/-]\d{1,2})\s*[,，]\s*([0-9]+(?:\.[0-9]{2,6})?)',
+                r'最新淨值[\s\S]{0,120}?([0-9]+(?:\.[0-9]{2,6})?)\s*(?:台幣|美元|人民幣|歐元)',
+                r'日期\s*[,，]\s*淨值[\s\S]{0,80}?(?:\d{2}/\d{2}|20\d{2}/\d{2}/\d{2})\s*[,，]\s*([0-9]+(?:\.[0-9]{2,6})?)',
+            ]
+            for pat in patterns:
+                m = re.search(pat, plain, flags=re.I)
+                if m:
+                    price = float(m.group(1))
+                    if 0 < price < 100000:
+                        return price
+
+            # 若摘要格式沒抓到，再交給原本解析器
+            return parse_moneydj_nav(raw)
         except Exception as e:
             last_err = e
             continue
