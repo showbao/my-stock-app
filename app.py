@@ -522,15 +522,39 @@ def http_get_text(url: str, timeout: int = 10):
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", errors="ignore")
 
-def fetch_usd_twd_from_exchangerate_host():
-    # exchangerate.host 支援 TWD（直接換 USD→TWD）
-    url = "https://api.exchangerate.host/convert?from=USD&to=TWD&amount=1"
-    j = http_get_json(url)
-    # 結構通常含 result
-    rate = j.get("result", None)
+def fetch_usd_twd_open_er_api():
+    # 不需要 API key：open.er-api.com
+    # 回傳格式：{ "rates": { "TWD": 31.xx, ... }, ... }
+    url = "https://open.er-api.com/v6/latest/USD"
+    j = http_get_json(url, timeout=10)
+    rates = j.get("rates", {}) if isinstance(j, dict) else {}
+    rate = rates.get("TWD", None)
     if rate is None:
-        raise ValueError("匯率來源回傳缺少 result")
+        raise ValueError("open.er-api 回傳缺少 TWD")
     return float(rate)
+
+def fetch_usd_twd_fawaz():
+    # 不需要 API key：@fawazahmed0/currency-api（走 jsDelivr CDN）
+    # 回傳格式：{ "twd": 31.xx, ... }
+    url = "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd/twd.json"
+    j = http_get_json(url, timeout=10)
+    rate = j.get("twd", None) if isinstance(j, dict) else None
+    if rate is None:
+        raise ValueError("fawaz 回傳缺少 twd")
+    return float(rate)
+
+def fetch_usd_twd():
+    # 依序嘗試（避免單一來源掛掉）
+    last_err = None
+    for fn in (fetch_usd_twd_open_er_api, fetch_usd_twd_fawaz):
+        try:
+            r = fn()
+            if r > 0:
+                return r
+        except Exception as e:
+            last_err = e
+            continue
+    raise ValueError(f"USD_TWD 抓取失敗：{last_err}")
 
 def fetch_tw_stock_price_mis(symbol: str):
     """
@@ -595,7 +619,7 @@ def fetch_price(symbol: str, asset_type: str):
     s = str(symbol).strip().upper()
 
     if s == "USD_TWD":
-        return fetch_usd_twd_from_exchangerate_host(), "TWD"
+        return fetch_usd_twd(), "TWD"
 
     if asset_type == "stock":
         if s.endswith(".TW") or re.fullmatch(r"\d{4}", s) or re.fullmatch(r"\d{4}\.TW", s):
@@ -920,7 +944,7 @@ with page_dash:
 
             sync_default = False
             if show_sync:
-                st.warning(f"你目前把的策略改成：{current_strategy}\n\n若你希望以後新增交易都自動帶這個策略，可勾選下面同步。")
+                st.warning(f"你目前把【{symbol_norm}】的策略改成：{current_strategy}\n\n若你希望以後新增交易都自動帶這個策略，可勾選下面同步。")
                 sync_default = st.checkbox("同步更新此 symbol 的預設策略（會影響所有頁面）", value=False)
 
             currency = st.selectbox(
@@ -1109,16 +1133,28 @@ with page_dash:
             with st.spinner("正在刷新價格…"):
                 ok_list, fail_list = refresh_prices(transactions_df, prices_df)
 
+            # 把結果先存起來，避免 st.rerun() 把訊息洗掉
+            st.session_state["refresh_ok_list"] = ok_list
+            st.session_state["refresh_fail_list"] = fail_list
+
             # 寫入成功後才清快取 + loading
             with st.spinner("正在重新同步資料…"):
                 st.cache_resource.clear()
 
-            if ok_list:
-                st.success("已更新：" + "、".join(ok_list[:8]) + ("…" if len(ok_list) > 8 else ""))
-            if fail_list:
-                st.warning("未更新：" + "、".join(fail_list[:6]) + ("…" if len(fail_list) > 6 else ""))
-
             st.rerun()
+
+    # 刷新結果（顯示一次後清掉）
+    if st.session_state.get("refresh_ok_list") is not None or st.session_state.get("refresh_fail_list") is not None:
+        ok_list = st.session_state.get("refresh_ok_list") or []
+        fail_list = st.session_state.get("refresh_fail_list") or []
+
+        if ok_list:
+            st.success("已更新：" + "、".join(ok_list[:8]) + ("…" if len(ok_list) > 8 else ""))
+        if fail_list:
+            st.warning("未更新：" + "、".join(fail_list[:6]) + ("…" if len(fail_list) > 6 else ""))
+
+        st.session_state["refresh_ok_list"] = None
+        st.session_state["refresh_fail_list"] = None
 
     # 取匯率/更新時間（用剛載入的 prices_df）
     fx, fx_updated = get_usd_twd_info(prices_df)
