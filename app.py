@@ -633,6 +633,44 @@ def get_prices_updated_at(assets_df):
 # =========================
 # 抓價
 # =========================
+
+
+def decode_response_bytes(data: bytes, content_type: str = "") -> str:
+    """盡量正確解碼中文基金網站頁面。MoneyDJ 常見 cp950 / big5。"""
+    ct = str(content_type or "").lower()
+
+    # 先依 header 指定 charset
+    m = re.search(r"charset=([\w\-]+)", ct)
+    candidates = []
+    if m:
+        candidates.append(m.group(1).strip())
+
+    # 常見中文網站編碼依序嘗試
+    candidates += [
+        "utf-8",
+        "utf-8-sig",
+        "cp950",
+        "big5",
+        "big5hkscs",
+        "latin1",
+    ]
+
+    tried = set()
+    for enc in candidates:
+        enc_l = enc.lower()
+        if enc_l in tried:
+            continue
+        tried.add(enc_l)
+        try:
+            txt = data.decode(enc)
+            # 若解出來有常見亂碼，再繼續試別的
+            if txt.count("�") > 5:
+                continue
+            return txt
+        except Exception:
+            continue
+
+    return data.decode("utf-8", errors="ignore")
 def http_get_json(url: str, timeout: int = 10):
     req = urllib.request.Request(
         url,
@@ -656,7 +694,8 @@ def http_get_text(url: str, timeout: int = 10):
         method="GET",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="ignore")
+        raw = resp.read()
+        return decode_response_bytes(raw, resp.headers.get("Content-Type", ""))
 
 
 def http_get_text_unverified(url: str, timeout: int = 10):
@@ -665,12 +704,14 @@ def http_get_text_unverified(url: str, timeout: int = 10):
         headers={
             "User-Agent": "Mozilla/5.0",
             "Accept": "text/html,text/plain,*/*",
+            "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
         },
         method="GET",
     )
     ctx = ssl._create_unverified_context()
     with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-        return resp.read().decode("utf-8", errors="ignore")
+        raw = resp.read()
+        return decode_response_bytes(raw, resp.headers.get("Content-Type", ""))
 
 
 
@@ -798,7 +839,8 @@ def fetch_moneydj_nav(nav_code: str):
 
             # 優先抓 MoneyDJ 常見摘要格式
             patterns = [
-                r'最新值\s*([0-9]+(?:\.[0-9]{2,6})?)',
+                r'淨值日期\s*[,，\s]+最新淨值[\s\S]{0,80}?(?:20\d{2}[/-]\d{1,2}[/-]\d{1,2}|\d{2}/\d{2})\s*[,，\s]+([0-9]+(?:\.[0-9]{2,6})?)',
+                r'最新值\s*([0-9]+(?:\.[0-9]{2,6})?)\s*(?:台幣|美元|人民幣|歐元)',
                 r'最新淨值[^0-9]{0,40}(?:20\d{2}[/-]\d{1,2}[/-]\d{1,2})\s*[,，]\s*([0-9]+(?:\.[0-9]{2,6})?)',
                 r'最新淨值[\s\S]{0,120}?([0-9]+(?:\.[0-9]{2,6})?)\s*(?:台幣|美元|人民幣|歐元)',
                 r'日期\s*[,，]\s*淨值[\s\S]{0,80}?(?:\d{2}/\d{2}|20\d{2}/\d{2}/\d{2})\s*[,，]\s*([0-9]+(?:\.[0-9]{2,6})?)',
