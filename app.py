@@ -379,9 +379,25 @@ def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame
     })
     df = df.merge(keep, on="symbol_key", how="left")
 
-    tx_strategy = df["strategy"].astype(str).str.strip() if "strategy" in df.columns else pd.Series([""] * len(df))
-    tx_asset_type = df["asset_type"].astype(str).str.strip().str.lower() if "asset_type" in df.columns else pd.Series([""] * len(df))
-    tx_currency = df["currency"].astype(str).str.strip().str.upper() if "currency" in df.columns else pd.Series([""] * len(df))
+    # 防呆：即使 assets 欄位不完整、或合併後沒有某些欄位，也不要直接報錯
+    master_defaults = {
+        "asset_name_master": "",
+        "asset_type_master": "",
+        "currency_master": "",
+        "strategy_master": "",
+        "enabled_master": "Y",
+        "price_master": 0.0,
+        "updated_at_master": "",
+        "quote_source_master": "",
+        "quote_code_master": "",
+    }
+    for c, default in master_defaults.items():
+        if c not in df.columns:
+            df[c] = default
+
+    tx_strategy = df["strategy"].astype(str).str.strip() if "strategy" in df.columns else pd.Series([""] * len(df), index=df.index)
+    tx_asset_type = df["asset_type"].astype(str).str.strip().str.lower() if "asset_type" in df.columns else pd.Series([""] * len(df), index=df.index)
+    tx_currency = df["currency"].astype(str).str.strip().str.upper() if "currency" in df.columns else pd.Series([""] * len(df), index=df.index)
 
     df["strategy_effective"] = df["strategy_master"].fillna("").astype(str).str.strip()
     df.loc[df["strategy_effective"] == "", "strategy_effective"] = tx_strategy
