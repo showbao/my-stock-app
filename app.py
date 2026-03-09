@@ -258,75 +258,6 @@ def normalize_assets_df(df: pd.DataFrame) -> pd.DataFrame:
 
 assets_df = normalize_assets_df(assets_df)
 
-
-def normalize_transactions_df(df: pd.DataFrame, assets_df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy() if df is not None else pd.DataFrame()
-    required = ["id", "date", "action", "symbol", "currency", "fx_rate", "qty", "price", "amount_original", "amount_twd", "fee", "tax"]
-    for c in required:
-        if c not in out.columns:
-            out[c] = "" if c in ["id", "date", "action", "symbol", "currency"] else 0
-    if out.empty:
-        out["symbol_key"] = pd.Series(dtype=str)
-        out["date_parsed"] = pd.Series(dtype="datetime64[ns]")
-        out["qty_num"] = pd.Series(dtype=float)
-        out["price_num"] = pd.Series(dtype=float)
-        out["fx_rate_num"] = pd.Series(dtype=float)
-        out["amount_original_num"] = pd.Series(dtype=float)
-        out["amount_twd_num"] = pd.Series(dtype=float)
-        out["fee_num"] = pd.Series(dtype=float)
-        out["tax_num"] = pd.Series(dtype=float)
-        out["data_error"] = pd.Series(dtype=bool)
-        out["data_error_reason"] = pd.Series(dtype=str)
-        return out
-
-    out["symbol"] = out["symbol"].astype(str).str.strip()
-    out["symbol_key"] = out["symbol"].apply(symbol_key)
-    out["action"] = out["action"].astype(str).str.strip().str.lower()
-    out["currency"] = out["currency"].astype(str).str.strip().str.upper()
-    out["date_parsed"] = pd.to_datetime(parse_date_series(out["date"]), errors="coerce")
-
-    numeric_map = {
-        "qty": "qty_num",
-        "price": "price_num",
-        "fx_rate": "fx_rate_num",
-        "amount_original": "amount_original_num",
-        "amount_twd": "amount_twd_num",
-        "fee": "fee_num",
-        "tax": "tax_num",
-    }
-    for src_col, dst_col in numeric_map.items():
-        out[dst_col] = pd.to_numeric(out.get(src_col, 0), errors="coerce").fillna(0.0)
-
-    if not assets_df.empty and "symbol_key" in assets_df.columns:
-        asset_ccy = assets_df[["symbol_key", "currency"]].drop_duplicates(subset=["symbol_key"], keep="last")
-        asset_ccy = asset_ccy.rename(columns={"currency": "asset_currency_master"})
-        out = out.merge(asset_ccy, on="symbol_key", how="left")
-        out["currency"] = out["asset_currency_master"].fillna("").astype(str).str.strip().str.upper().where(
-            out["asset_currency_master"].fillna("").astype(str).str.strip() != "",
-            out["currency"]
-        )
-        out = out.drop(columns=["asset_currency_master"], errors="ignore")
-
-    # 交易層資料防呆：若某商品歷史累計數量出現負值，直接標記為 data_error
-    out["data_error"] = False
-    out["data_error_reason"] = ""
-    if not out.empty:
-        work = out.sort_values(["symbol_key", "date_parsed", "id"]).copy()
-        signed_qty = pd.Series(0.0, index=work.index)
-        signed_qty.loc[work["action"].isin(["buy", "initial"])] = work.loc[work["action"].isin(["buy", "initial"]), "qty_num"]
-        signed_qty.loc[work["action"] == "sell"] = -work.loc[work["action"] == "sell", "qty_num"]
-        work["signed_qty"] = signed_qty
-        work["cum_qty"] = work.groupby("symbol_key")["signed_qty"].cumsum()
-        bad_keys = work.loc[work["cum_qty"] < -1e-9, "symbol_key"].dropna().astype(str).unique().tolist()
-        if bad_keys:
-            mask = out["symbol_key"].isin(bad_keys)
-            out.loc[mask, "data_error"] = True
-            out.loc[mask, "data_error_reason"] = "持股累計曾小於 0"
-
-    return out
-
-transactions_df = normalize_transactions_df(transactions_df, assets_df)
-
 def get_asset_row(symbol: str):
     if assets_df is None or assets_df.empty:
         return None
@@ -421,6 +352,7 @@ def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame
                 df[c] = ""
         return df
 
+    # 讓這個函式可重複呼叫：若傳進來的是已 enrich 過的資料，先把上次加上的欄位移除，避免 merge 衝突
     derived_cols = [
         "symbol_key",
         "asset_name_master", "asset_type_master", "currency_master", "strategy_master",
@@ -428,19 +360,18 @@ def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame
         "strategy_effective", "asset_type_effective", "currency_effective", "price_current",
         "name_effective", "enabled_effective",
     ]
-    drop_cols = [c for c in derived_cols if c in df.columns and c not in ["symbol_key"]]
+    drop_cols = [c for c in derived_cols if c in df.columns]
     if drop_cols:
         df = df.drop(columns=drop_cols, errors="ignore")
 
     if "symbol" not in df.columns:
         df["symbol"] = ""
     df["symbol"] = df["symbol"].astype(str).str.strip()
-    if "symbol_key" not in df.columns:
-        df["symbol_key"] = df["symbol"].astype(str).apply(symbol_key)
+    df["symbol_key"] = df["symbol"].astype(str).apply(symbol_key)
 
     a = assets_df.copy() if assets_df is not None else pd.DataFrame()
     if a.empty:
-        df["strategy_effective"] = "未分類"
+        df["strategy_effective"] = df.get("strategy", "").astype(str).str.strip() if "strategy" in df.columns else ""
         df["asset_type_effective"] = df.get("asset_type", "").astype(str).str.strip().str.lower() if "asset_type" in df.columns else ""
         df["currency_effective"] = df.get("currency", "").astype(str).str.strip().str.upper() if "currency" in df.columns else ""
         df["price_current"] = 0.0
@@ -463,6 +394,7 @@ def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame
     })
     df = df.merge(keep, on="symbol_key", how="left")
 
+    # 防呆：即使 assets 欄位不完整、或合併後沒有某些欄位，也不要直接報錯
     master_defaults = {
         "asset_name_master": "",
         "asset_type_master": "",
@@ -479,10 +411,12 @@ def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame
         if c not in df.columns:
             df[c] = default
 
+    tx_strategy = df["strategy"].astype(str).str.strip() if "strategy" in df.columns else pd.Series([""] * len(df), index=df.index)
     tx_asset_type = df["asset_type"].astype(str).str.strip().str.lower() if "asset_type" in df.columns else pd.Series([""] * len(df), index=df.index)
     tx_currency = df["currency"].astype(str).str.strip().str.upper() if "currency" in df.columns else pd.Series([""] * len(df), index=df.index)
 
     df["strategy_effective"] = df["strategy_master"].fillna("").astype(str).str.strip()
+    df.loc[df["strategy_effective"] == "", "strategy_effective"] = tx_strategy
     df.loc[df["strategy_effective"] == "", "strategy_effective"] = "未分類"
 
     df["asset_type_effective"] = df["asset_type_master"].fillna("").astype(str).str.strip().str.lower()
@@ -491,7 +425,7 @@ def enrich_transactions_with_assets(df_tx: pd.DataFrame, assets_df: pd.DataFrame
     df["currency_effective"] = df["currency_master"].fillna("").astype(str).str.strip().str.upper()
     df.loc[df["currency_effective"] == "", "currency_effective"] = tx_currency
 
-    df["price_current"] = pd.to_numeric(df["price_master"], errors="coerce").fillna(0.0)
+    df["price_current"] = df["price_master"].fillna(0).apply(to_number)
     df["name_effective"] = df["asset_name_master"].fillna("").astype(str).str.strip()
     df.loc[df["name_effective"] == "", "name_effective"] = df["symbol"]
 
@@ -567,260 +501,6 @@ def calculate_metrics(df, assets_df):
     total_profit = total_value + total_dividend - total_invest
     rate = (total_profit / total_invest * 100) if total_invest != 0 else 0.0
     return total_invest, total_value, total_dividend, total_profit, rate
-
-def resolve_period_dates(period_mode: str):
-    today = date.today()
-    mode = str(period_mode or "全部").strip()
-    if mode == "今年以來":
-        return date(today.year, 1, 1), today
-    if mode == "近一年":
-        return today - timedelta(days=365), today
-    return None, None
-
-
-def get_period_label(period_mode: str) -> str:
-    today = date.today()
-    mode = str(period_mode or "全部").strip()
-    if mode == "今年以來":
-        return f"{today.year} 累計股息"
-    if mode == "近一年":
-        return "近 365 天股息"
-    return "累積股息"
-
-
-def calculate_income_metrics(df_tx: pd.DataFrame):
-    empty = {
-        "period_dividend": 0.0,
-        "cost_yield_pct": None,
-        "dividend_share_pct": None,
-        "has_data": False,
-        "warning_list": [],
-    }
-    if df_tx is None or df_tx.empty:
-        return empty
-
-    df = df_tx.copy()
-    if "strategy_effective" not in df.columns:
-        return empty
-
-    warning_list = sorted(df.loc[df.get("data_error", False) == True, "symbol"].astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()) if "data_error" in df.columns else []
-    df = df[(df["strategy_effective"].astype(str).str.strip() == "存股") & (~df.get("data_error", False))].copy()
-    if df.empty:
-        empty["warning_list"] = warning_list
-        return empty
-
-    period_dividend = float(df.loc[df["action"] == "dividend", "amount_twd_num"].sum())
-
-    invest_buy = float(df.loc[df["action"].isin(["buy", "initial"]), "amount_twd_num"].sum())
-    sell_back = float(df.loc[df["action"] == "sell", "amount_twd_num"].sum())
-    net_invest = invest_buy - sell_back
-    total_dividend = period_dividend
-
-    cost_yield_pct = (period_dividend / net_invest * 100.0) if net_invest > 0 else None
-    dividend_share_pct = (total_dividend / net_invest * 100.0) if net_invest > 0 else None
-
-    return {
-        "period_dividend": period_dividend,
-        "cost_yield_pct": cost_yield_pct,
-        "dividend_share_pct": dividend_share_pct,
-        "has_data": True,
-        "warning_list": warning_list,
-    }
-
-
-def calculate_trading_metrics(df_tx: pd.DataFrame):
-    empty = {
-        "win_rate_pct": None,
-        "avg_realized_pnl": None,
-        "avg_holding_days": None,
-        "profit_loss_ratio": None,
-        "trade_count": 0,
-        "warning_list": [],
-        "missing_cost_symbols": [],
-        "has_fee_tax_columns": False,
-        "has_data": False,
-    }
-    if df_tx is None or df_tx.empty:
-        return empty
-
-    df = df_tx.copy()
-    if "strategy_effective" not in df.columns:
-        return empty
-
-    has_fee_tax_columns = ("fee" in df.columns) and ("tax" in df.columns)
-    base_warning = sorted(df.loc[df.get("data_error", False) == True, "symbol"].astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()) if "data_error" in df.columns else []
-    df = df[(df["strategy_effective"].astype(str).str.strip() == "波段") & (~df.get("data_error", False))].copy()
-    if df.empty:
-        empty["warning_list"] = base_warning
-        empty["has_fee_tax_columns"] = has_fee_tax_columns
-        return empty
-
-    df = df.sort_values(["symbol_key", "date_parsed", "id"]).copy()
-    realized_rows = []
-    missing_cost_symbols = set()
-
-    for sym, g in df.groupby("symbol_key", dropna=False):
-        pool_qty = 0.0
-        pool_cost_twd = 0.0
-        lot_dates = []
-        bad_symbol = False
-        display_symbol = str(g["symbol"].iloc[-1]).strip() if not g.empty else str(sym)
-
-        for _, row in g.iterrows():
-            action = str(row.get("action", "")).strip().lower()
-            qty = float(row.get("qty_num", 0.0) or 0.0)
-            amount_twd = float(row.get("amount_twd_num", 0.0) or 0.0)
-            fee_twd = float(row.get("fee_num", 0.0) or 0.0)
-            tax_twd = float(row.get("tax_num", 0.0) or 0.0)
-            row_date = row.get("date_parsed")
-
-            if action in ["buy", "initial"]:
-                if qty > 0:
-                    pool_qty += qty
-                    pool_cost_twd += amount_twd + fee_twd + tax_twd
-                    lot_dates.append((row_date, qty))
-                continue
-
-            if action != "sell":
-                continue
-
-            if qty <= 0 or pool_qty <= 0 or qty - pool_qty > 1e-9:
-                bad_symbol = True
-                missing_cost_symbols.add(display_symbol)
-                break
-
-            avg_cost = pool_cost_twd / pool_qty if pool_qty > 0 else 0.0
-            realized_cost = avg_cost * qty
-            realized_pnl = amount_twd - realized_cost - fee_twd - tax_twd
-
-            earliest_valid_date = None
-            if lot_dates:
-                lot_dates = sorted(lot_dates, key=lambda x: (pd.Timestamp(x[0]) if pd.notnull(x[0]) else pd.Timestamp.min))
-                for d, q_left in lot_dates:
-                    if q_left > 1e-9:
-                        earliest_valid_date = d
-                        break
-            holding_days = None
-            if pd.notnull(row_date) and pd.notnull(earliest_valid_date):
-                holding_days = max(0, int((pd.Timestamp(row_date) - pd.Timestamp(earliest_valid_date)).days))
-
-            realized_rows.append({
-                "symbol": display_symbol,
-                "pnl": realized_pnl,
-                "holding_days": holding_days,
-            })
-
-            qty_to_reduce = qty
-            new_lots = []
-            for d, q_left in lot_dates:
-                if qty_to_reduce <= 1e-9:
-                    new_lots.append((d, q_left))
-                    continue
-                if q_left <= qty_to_reduce + 1e-9:
-                    qty_to_reduce -= q_left
-                else:
-                    new_lots.append((d, q_left - qty_to_reduce))
-                    qty_to_reduce = 0.0
-            lot_dates = new_lots
-
-            pool_qty -= qty
-            pool_cost_twd -= realized_cost
-            if pool_qty < 1e-9:
-                pool_qty = 0.0
-                pool_cost_twd = 0.0
-                lot_dates = []
-            if pool_qty < -1e-9 or pool_cost_twd < -1e-6:
-                bad_symbol = True
-                missing_cost_symbols.add(display_symbol)
-                break
-
-        if bad_symbol:
-            realized_rows = [r for r in realized_rows if r["symbol"] != display_symbol]
-
-    if not realized_rows:
-        empty["warning_list"] = sorted(set(base_warning))
-        empty["missing_cost_symbols"] = sorted(missing_cost_symbols)
-        empty["has_fee_tax_columns"] = has_fee_tax_columns
-        return empty
-
-    pnl_list = [r["pnl"] for r in realized_rows]
-    wins = [x for x in pnl_list if x > 0]
-    losses = [x for x in pnl_list if x < 0]
-    holding_vals = [r["holding_days"] for r in realized_rows if r["holding_days"] is not None]
-
-    avg_profit = (sum(wins) / len(wins)) if wins else None
-    avg_loss_abs = (abs(sum(losses) / len(losses))) if losses else None
-    profit_loss_ratio = (avg_profit / avg_loss_abs) if (avg_profit is not None and avg_loss_abs not in [None, 0]) else None
-
-    return {
-        "win_rate_pct": (len(wins) / len(pnl_list) * 100.0) if pnl_list else None,
-        "avg_realized_pnl": (sum(pnl_list) / len(pnl_list)) if pnl_list else None,
-        "avg_holding_days": (sum(holding_vals) / len(holding_vals)) if holding_vals else None,
-        "profit_loss_ratio": profit_loss_ratio,
-        "trade_count": len(pnl_list),
-        "warning_list": sorted(set(base_warning)),
-        "missing_cost_symbols": sorted(missing_cost_symbols),
-        "has_fee_tax_columns": has_fee_tax_columns,
-        "has_data": True,
-    }
-
-
-def render_analysis_cards(period_mode: str, income_metrics: dict, trading_metrics: dict):
-    period_title = get_period_label(period_mode)
-    st.markdown("#### 存股分析")
-    income_html = "".join([
-        kpi_card_html(period_title, fmt_money(income_metrics.get("period_dividend", 0))),
-        kpi_card_html("成本殖利率", fmt_signed_pct_html(income_metrics["cost_yield_pct"]) if income_metrics.get("cost_yield_pct") is not None else "—"),
-        kpi_card_html("累積收息占投入比率", fmt_signed_pct_html(income_metrics["dividend_share_pct"]) if income_metrics.get("dividend_share_pct") is not None else "—"),
-    ])
-    st.markdown(f'<div class="kpi-grid">{income_html}</div>', unsafe_allow_html=True)
-    if not income_metrics.get("has_data"):
-        st.caption("本策略無此數據")
-
-    st.markdown("#### 波段分析")
-    avg_days = trading_metrics.get("avg_holding_days")
-    avg_days_text = f"{avg_days:.1f} 天" if avg_days is not None else "—"
-    trading_html = "".join([
-        kpi_card_html("勝率", fmt_signed_pct_html(trading_metrics["win_rate_pct"]) if trading_metrics.get("win_rate_pct") is not None else "—"),
-        kpi_card_html("平均每筆已實現損益", fmt_signed_money_html(trading_metrics["avg_realized_pnl"]) if trading_metrics.get("avg_realized_pnl") is not None else "—"),
-        kpi_card_html("平均持有天數", avg_days_text),
-        kpi_card_html("盈虧比", f"{trading_metrics['profit_loss_ratio']:.2f}" if trading_metrics.get("profit_loss_ratio") is not None else "—"),
-    ])
-    st.markdown(f'<div class="kpi-grid">{trading_html}</div>', unsafe_allow_html=True)
-    if not trading_metrics.get("has_data"):
-        st.caption("本策略無此數據")
-
-
-def render_status_and_warnings(ok_list, fail_list, income_metrics: dict, trading_metrics: dict, prices_updated: str | None):
-    st.markdown("#### 更新狀況與錯誤提示")
-    shown = False
-    if ok_list:
-        st.success("已更新：" + "、".join(ok_list[:8]) + ("…" if len(ok_list) > 8 else ""))
-        shown = True
-    if fail_list:
-        st.warning("未更新：" + "、".join(fail_list[:6]) + ("…" if len(fail_list) > 6 else ""))
-        shown = True
-
-    data_errors = sorted(set((income_metrics.get("warning_list") or []) + (trading_metrics.get("warning_list") or [])))
-    if data_errors:
-        st.warning("以下商品資料異常，已跳過專屬分析：" + "、".join(data_errors[:10]) + ("…" if len(data_errors) > 10 else ""))
-        shown = True
-
-    missing_cost = trading_metrics.get("missing_cost_symbols") or []
-    if missing_cost:
-        st.warning("以下商品買賣資料不足，未納入波段分析：" + "、".join(missing_cost[:10]) + ("…" if len(missing_cost) > 10 else ""))
-        shown = True
-
-    if not trading_metrics.get("has_fee_tax_columns", False):
-        st.info("目前未讀到 fee / tax 欄位，波段結果可能偏高。")
-        shown = True
-
-    if not shown:
-        if prices_updated:
-            st.caption(f"目前未發現額外提醒。最後價格更新：{prices_updated}")
-        else:
-            st.caption("目前未發現額外提醒。")
-
 
 def top_holdings_table(df_tx: pd.DataFrame, assets_df: pd.DataFrame, top_n: int = 3) -> pd.DataFrame:
     if df_tx is None or df_tx.empty:
@@ -1472,11 +1152,8 @@ def apply_filters(df: pd.DataFrame, start_d: date | None, end_d: date | None, sy
         return df
 
     out = df.copy()
-    if "date_parsed" in out.columns:
-        out["_d"] = pd.to_datetime(out["date_parsed"], errors="coerce").dt.date
-    elif "date" in out.columns:
+    if "date" in out.columns:
         out["_d"] = parse_date_series(out["date"])
-    if "_d" in out.columns:
         if start_d:
             out = out[out["_d"] >= start_d]
         if end_d:
@@ -1763,7 +1440,8 @@ with page_dash:
 
         add_trade_dialog()
 
-    st.session_state.setdefault("dash_period_mode", "全部")
+    st.session_state.setdefault("dash_start", None)
+    st.session_state.setdefault("dash_end", None)
     st.session_state.setdefault("dash_symbols", [])
     st.session_state.setdefault("dash_strategy", "全部")
 
@@ -1777,12 +1455,17 @@ with page_dash:
 
     f1, f2 = st.columns([7, 3])
     with f1:
-        st.radio("時間範圍", options=["今年以來", "近一年", "全部"], horizontal=True, key="dash_period_mode")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.date_input("開始日期", key="dash_start")
+        with c2:
+            st.date_input("結束日期", key="dash_end")
         st.multiselect("Symbol（可多選）", options=all_symbols, key="dash_symbols")
         st.selectbox("Strategy", options=all_strategies, key="dash_strategy")
 
         if st.button("清除篩選", use_container_width=True):
-            st.session_state.dash_period_mode = "全部"
+            st.session_state.dash_start = None
+            st.session_state.dash_end = None
             st.session_state.dash_symbols = []
             st.session_state.dash_strategy = "全部"
             st.rerun()
@@ -1803,28 +1486,33 @@ with page_dash:
                 st.cache_resource.clear()
             st.rerun()
 
-    ok_list = st.session_state.get("refresh_ok_list") or []
-    fail_list = st.session_state.get("refresh_fail_list") or []
+    if st.session_state.get("refresh_ok_list") is not None or st.session_state.get("refresh_fail_list") is not None:
+        ok_list = st.session_state.get("refresh_ok_list") or []
+        fail_list = st.session_state.get("refresh_fail_list") or []
+        if ok_list:
+            st.success("已更新：" + "、".join(ok_list[:8]) + ("…" if len(ok_list) > 8 else ""))
+        if fail_list:
+            st.warning("未更新：" + "、".join(fail_list[:6]) + ("…" if len(fail_list) > 6 else ""))
+        st.session_state["refresh_ok_list"] = None
+        st.session_state["refresh_fail_list"] = None
 
     fx, fx_updated = get_usd_twd_info(assets_df)
     prices_updated = get_prices_updated_at(assets_df)
 
-    period_mode = st.session_state.get("dash_period_mode", "全部")
-    dash_start, dash_end = resolve_period_dates(period_mode)
-
+    # 用商品主檔的 asset_type 分類
     tx_all = enriched_tx_df[enriched_tx_df["asset_type_effective"].isin(["stock", "fund"])].copy()
     tx_stock = tx_all[tx_all["asset_type_effective"] == "stock"].copy()
     tx_fund = tx_all[tx_all["asset_type_effective"] == "fund"].copy()
 
-    dash_filtered_all = apply_filters(tx_all, dash_start, dash_end, st.session_state.get("dash_symbols", []), st.session_state.get("dash_strategy", "全部"))
-    dash_filtered_stock = apply_filters(tx_stock, dash_start, dash_end, st.session_state.get("dash_symbols", []), st.session_state.get("dash_strategy", "全部"))
-    dash_filtered_fund = apply_filters(tx_fund, dash_start, dash_end, st.session_state.get("dash_symbols", []), st.session_state.get("dash_strategy", "全部"))
+    dash_filtered_all = apply_filters(tx_all, st.session_state.get("dash_start"), st.session_state.get("dash_end"), st.session_state.get("dash_symbols", []), st.session_state.get("dash_strategy", "全部"))
+    dash_filtered_stock = apply_filters(tx_stock, st.session_state.get("dash_start"), st.session_state.get("dash_end"), st.session_state.get("dash_symbols", []), st.session_state.get("dash_strategy", "全部"))
+    dash_filtered_fund = apply_filters(tx_fund, st.session_state.get("dash_start"), st.session_state.get("dash_end"), st.session_state.get("dash_symbols", []), st.session_state.get("dash_strategy", "全部"))
 
     all_metrics = calculate_metrics(dash_filtered_all, assets_df)
     stock_metrics = calculate_metrics(dash_filtered_stock, assets_df)
     fund_metrics = calculate_metrics(dash_filtered_fund, assets_df)
 
-    def render_dashboard(metrics, label, df_for_table, period_mode):
+    def render_dashboard(metrics, label, df_for_table):
         if metrics is None:
             st.error("資料異常：出現負持股")
             hero_card("目前市值（TWD）", "—", "請先確認交易資料是否正確")
@@ -1862,21 +1550,13 @@ with page_dash:
         top3 = top_holdings_table(df_for_table, assets_df, top_n=3)
         st.dataframe(top3, use_container_width=True, hide_index=True)
 
-        income_metrics = calculate_income_metrics(df_for_table)
-        trading_metrics = calculate_trading_metrics(df_for_table)
-        render_analysis_cards(period_mode, income_metrics, trading_metrics)
-        render_status_and_warnings(ok_list, fail_list, income_metrics, trading_metrics, prices_updated)
-
     tab_all, tab_stock, tab_fund = st.tabs(["全部", "股票", "基金"])
     with tab_all:
-        render_dashboard(all_metrics, "全部", dash_filtered_all, period_mode)
+        render_dashboard(all_metrics, "全部", dash_filtered_all)
     with tab_stock:
-        render_dashboard(stock_metrics, "股票", dash_filtered_stock, period_mode)
+        render_dashboard(stock_metrics, "股票", dash_filtered_stock)
     with tab_fund:
-        render_dashboard(fund_metrics, "基金", dash_filtered_fund, period_mode)
-
-    st.session_state["refresh_ok_list"] = None
-    st.session_state["refresh_fail_list"] = None
+        render_dashboard(fund_metrics, "基金", dash_filtered_fund)
 
 # =========================
 # 交易明細
