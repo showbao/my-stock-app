@@ -1320,7 +1320,17 @@ with page_dash:
             currency = st.selectbox("幣別", ["TWD", "USD"], key="in_currency", on_change=mark_dirty)
             qty = st.number_input("數量", min_value=0.0, key="in_qty", on_change=mark_dirty)
             price = st.number_input("單價", min_value=0.0, key="in_price", on_change=mark_dirty)
+            amount_twd = st.number_input("金額 (TWD)")
 
+            try:
+               _amount_hint = float(qty) * float(price) * float(fx_rate)
+               st.caption(
+               f"💡 參考試算：{qty} × {price} × {fx_rate} = {_amount_hint:,.2f}"
+               )
+
+            except Exception:
+                pass
+              
             if currency == "TWD":
                 st.session_state.in_fx_rate = 1.0
                 fx_rate = st.number_input("匯率（USD_TWD）", value=1.0, disabled=True)
@@ -1927,37 +1937,122 @@ try:
                     st.markdown(f"### {asset_name}（{selected_symbol}）")
                     st.caption(f"策略：{strategy}")
 
-                    if result is None or result.get("is_error"):
-                        st.warning(
-                            result.get("message", "資料異常，請檢查該標的是否漏填 initial 交易")
-                            if isinstance(result, dict) else
-                            "資料異常，請檢查該標的是否漏填 initial 交易"
-                        )
-                    else:
-                        c1, c2, c3 = st.columns(3)
-                        with c1:
-                            _engine_metric_card("期末持股", f'{result["ending_qty"]:.4f}'.rstrip("0").rstrip("."))
-                        with c2:
-                            _engine_metric_card("期末成本", f'{result["ending_cost"]:,.0f}')
-                        with c3:
-                            _engine_metric_card("市值", f'{result["market_value"]:,.0f}')
+if result is None or result.get("is_error"):
+    st.warning(
+        result.get("message", "資料異常，請檢查該標的是否漏填 initial 交易")
+        if isinstance(result, dict) else
+        "資料異常，請檢查該標的是否漏填 initial 交易"
+    )
+else:
+    # 基本卡片
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        _engine_metric_card("期末持股", f'{result["ending_qty"]:.4f}'.rstrip("0").rstrip("."))
+    with c2:
+        _engine_metric_card("期末成本", f'{result["ending_cost"]:,.0f}')
+    with c3:
+        _engine_metric_card("市值", f'{result["market_value"]:,.0f}')
 
-                        c4, c5, c6 = st.columns(3)
-                        with c4:
-                            _engine_metric_card("已實現損益", f'{result["realized_profit"]:,.0f}')
-                        with c5:
-                            _engine_metric_card("未實現損益", f'{result["unrealized_profit"]:,.0f}')
-                        with c6:
-                            _engine_metric_card("區間損益", f'{result["range_profit"]:,.0f}')
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        _engine_metric_card("已實現損益", f'{result["realized_profit"]:,.0f}')
+    with c5:
+        _engine_metric_card("未實現損益", f'{result["unrealized_profit"]:,.0f}')
+    with c6:
+        _engine_metric_card("區間損益", f'{result["range_profit"]:,.0f}')
 
-                        roi_text = "N/A" if result["roi"] is None else f'{result["roi"]*100:.2f}%'
-                        c7, c8, c9 = st.columns(3)
-                        with c7:
-                            _engine_metric_card("ROI", roi_text)
-                        with c8:
-                            _engine_metric_card("區間買進", f'{result["buy_total"]:,.0f}')
-                        with c9:
-                            _engine_metric_card("區間配息", f'{result["dividend"]:,.0f}')
+    # 依策略分流指標
+    strategy_lower = str(strategy).strip().lower()
+    is_swing = ("波段" in str(strategy)) or ("swing" in strategy_lower)
+    is_long = ("存股" in str(strategy)) or ("long" in strategy_lower)
+
+    # 全歷史累積股息（給存股用）
+    try:
+        _hist_dividend = df_symbol[
+            df_symbol["action"].astype(str).str.lower() == "dividend"
+        ]["amount_twd"].sum()
+    except Exception:
+        _hist_dividend = 0.0
+
+    # 全歷史總投入（給存股用）
+    try:
+        _hist_total_buy = df_symbol[
+            df_symbol["action"].astype(str).str.lower().isin(["initial", "buy"])
+        ]["amount_twd"].sum()
+    except Exception:
+        _hist_total_buy = 0.0
+
+    # 資產回收率 = (全歷史累積股息 + 已實現損益) / 全歷史總投入成本
+    recoupment_ratio = None
+    if _hist_total_buy > 0:
+        recoupment_ratio = (_hist_dividend + result["realized_profit"]) / _hist_total_buy
+
+    # 成本殖利率 YOC = 全歷史累積股息 / 目前剩餘持股之原始總投入成本
+    yoc = None
+    if result["ending_cost"] > 0:
+        yoc = _hist_dividend / result["ending_cost"]
+
+    st.markdown("#### 策略指標")
+
+    if is_swing:
+        s1, s2, s3, s4 = st.columns(4)
+
+        with s1:
+            _engine_metric_card("波段・已實現損益", f'{result["realized_profit"]:,.0f}')
+
+        with s2:
+            _engine_metric_card("波段・未實現損益", f'{result["unrealized_profit"]:,.0f}')
+
+        with s3:
+            _engine_metric_card("波段・區間損益", f'{result["range_profit"]:,.0f}')
+
+        with s4:
+            _engine_metric_card(
+                "波段・ROI",
+                "N/A" if result["roi"] is None else f'{result["roi"]*100:.2f}%'
+            )
+
+        st.caption("波段指標：以區間損益、已實現損益、未實現損益、ROI 為主。")
+
+    elif is_long:
+        l1, l2, l3, l4 = st.columns(4)
+
+        with l1:
+            _engine_metric_card("存股・累計股息", f'{_hist_dividend:,.0f}')
+
+        with l2:
+            _engine_metric_card(
+                "存股・成本殖利率",
+                "N/A" if yoc is None else f'{yoc*100:.2f}%'
+            )
+
+        with l3:
+            _engine_metric_card(
+                "存股・資產回收率",
+                "N/A" if recoupment_ratio is None else f'{recoupment_ratio*100:.2f}%'
+            )
+
+        with l4:
+            _engine_metric_card("存股・未實現損益", f'{result["unrealized_profit"]:,.0f}')
+
+        st.caption("存股指標：以累計股息、成本殖利率、資產回收率、未實現損益為主。")
+
+    else:
+        x1, x2, x3, x4 = st.columns(4)
+
+        with x1:
+            _engine_metric_card("累計股息", f'{_hist_dividend:,.0f}')
+        with x2:
+            _engine_metric_card("已實現損益", f'{result["realized_profit"]:,.0f}')
+        with x3:
+            _engine_metric_card("未實現損益", f'{result["unrealized_profit"]:,.0f}')
+        with x4:
+            _engine_metric_card(
+                "ROI",
+                "N/A" if result["roi"] is None else f'{result["roi"]*100:.2f}%'
+            )
+
+        st.caption("此標的尚未明確分類為波段或存股，先顯示通用指標。")
 
         else:
             col_a, col_b = st.columns(2)
